@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 from lhotse import Recording, SupervisionSegment, SupervisionSet, RecordingSet, CutSet
 from pathlib import Path

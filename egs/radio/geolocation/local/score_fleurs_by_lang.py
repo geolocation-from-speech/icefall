@@ -79,6 +79,9 @@ def main(args):
     with open(results_dir / f"results_per_lang_{args.suffix}.json", "w") as f:
         json.dump(results, f, indent=4) 
 
+    macro_avg = sum(r[1]['avg_dist'] for r in results) / len(results)
+    print(f"Macro_Acc: {macro_avg}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

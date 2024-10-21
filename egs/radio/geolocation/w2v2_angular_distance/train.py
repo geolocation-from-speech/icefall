@@ -318,6 +318,7 @@ def add_model_arguments(parser):
     parser.add_argument("--pooling-type", type=str, default="att",
         choices=["att", "avg"], help="The pooling mechanism to use."
     )
+    parser.add_argument("--pooling-heads", type=int, default=1)
     parser.add_argument("--pooling-loc", type=int, default=0, choices=[0, 1, 2],
         help="An integer specifying where in the model representations should "
         "be pooled.\n"
@@ -355,6 +356,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         freeze_feat_extractor=params.freeze_feat_extractor,
         pooling_loc=params.pooling_loc,
         pooling_type=params.pooling_type,
+        pooling_heads=params.pooling_heads,
     )
     return model
 
@@ -924,6 +926,7 @@ def main():
     with open(str(args.exp_dir) + "/args.conf", 'w', encoding='utf-8') as f:
         to_print = vars(args)
         to_print['exp_dir'] = str(to_print['exp_dir']) 
+        to_print['cuts'] = str(to_print['cuts'])
         print(vars(args), file=f)
 
     args.exp_dir = Path(args.exp_dir)
