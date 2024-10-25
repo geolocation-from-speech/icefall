@@ -12,7 +12,6 @@ from lhotse import CutSet, Fbank, FbankConfig, load_manifest, load_manifest_lazy
 from lhotse.dataset import (
     CutMix,
     DynamicBucketingSampler,
-    SpecAugment,
 )
 from lhotse.dataset.input_strategies import OnTheFlyFeatures
 from torch.utils.data import DataLoader
@@ -96,15 +95,6 @@ class GeolocationDataModule:
             default=8,
             help="The number of training dataloader workers that "
             "collect the batches.",
-        )
-        group.add_argument(
-            "--spec-aug-time-warp-factor",
-            type=int,
-            default=80,
-            help="Used only when --enable-spec-aug is True. "
-            "It specifies the factor for time warping in SpecAugment. "
-            "Larger values mean more warping. "
-            "A value less than 1 means to disable time warp.",
         )
         group.add_argument(
             "--use-feats",
