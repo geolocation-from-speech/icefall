@@ -57,12 +57,12 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   ./local/prepare_cuts.py \
     --recordings ${manifests}/radio_recordings.jsonl.gz \
     --supervisions ${manifests}/radio_supervisions.jsonl.gz \
-    ${manifests}/radio_cuts2.jsonl.gz
+    --window-lengths "5,10",
+    ${manifests}/radio_cuts.jsonl.gz
 
   ./local/prepare_fleurs.py \
     data/manifests/fleurs_dev ${fleurs}/*_*/dev
 
   ./local/prepare_fleurs.py \
     data/manifests/fleurs_test ${fleurs}/*_*/test
-
 fi

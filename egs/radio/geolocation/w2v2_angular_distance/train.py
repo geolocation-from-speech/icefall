@@ -57,6 +57,7 @@ import torch.nn as nn
 
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
+from lhotse import load_manifest_lazy
 
 from model import Wav2Vec2Model
 from torch import Tensor
@@ -262,7 +263,7 @@ def get_parser():
     parser.add_argument(
         "--save-every-n",
         type=int,
-        default=4000,
+        default=10000,
         help="""Save checkpoint after processing this number of batches"
         periodically. We save checkpoint to exp-dir/ whenever
         params.batch_idx_train % save_every_n == 0. The checkpoint filename
@@ -341,7 +342,7 @@ def get_params() -> AttributeDict:
             "batch_idx_train": 0,
             "log_interval": 100, #25
             "reset_interval": 200,
-            "valid_interval": 500,  # 500
+            "valid_interval": 1000,  # 500
             # parameters for zipformer
             "feature_dim": 64,
             "env_info": get_env_info(),
@@ -853,8 +854,9 @@ def run(rank, world_size, args):
     # Remove any really short segments
     cuts = cuts.filter(lambda c: c.duration >= 2.0)
     train_cuts = cuts.filter(lambda c: c.supervisions[0].custom['station'] not in valid_stations)
-    valid_cuts = cuts.filter(lambda c: c.supervisions[0].custom['station'] in valid_stations)
-    valid_cuts = valid_cuts.subset(first=2000)
+    #valid_cuts = cuts.filter(lambda c: c.supervisions[0].custom['station'] in valid_stations)
+    #valid_cuts = valid_cuts.subset(first=2000)
+    valid_cuts = load_manifest_lazy("data/manifests/fleurs_dev/cuts_11.jsonl.gz")
     
     if args.debug:
         debug_cuts = train_cuts.shuffle().subset(first=50)
