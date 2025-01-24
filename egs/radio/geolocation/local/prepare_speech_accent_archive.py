@@ -7,6 +7,7 @@ from lhotse import (
 import csv
 from tqdm import tqdm
 import json
+from pathlib import Path
 
 
 def get_geolocations(args):
@@ -65,6 +66,7 @@ def main(args):
         segs.append(
             SupervisionSegment(
                 start=0,
+                speaker=Path(r.id).stem,
                 duration=r.duration,
                 recording_id=r.id,
                 id=r.id,
@@ -83,8 +85,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("recos")
-    parser.add_argument("metadata")
     parser.add_argument("out")
+    parser.add_argument("--metadata")
     parser.add_argument("--geolocations")
     args = parser.parse_args()
     main(args)

@@ -345,7 +345,6 @@ def run(rank, world_size, args):
 
     radio_ssl = GeolocationDataModule(args)
     cuts = load_manifest_lazy(args.valid_cuts)
-    #cuts = cuts.cut_into_windows(10)
     valid_dl = radio_ssl.valid_dataloaders(cuts)
 
     valid_info, preds, tgts, ids = predict(
@@ -371,8 +370,9 @@ def run(rank, world_size, args):
 
     if params.average_over_segments:
         logging.info("Averaging over segments ...")
-        X, X_, Y = [], [], []
+        X, X_, Y, group_ids = [], [], [], []
         for i, j  in groupby(zip(ids, preds, tgts), lambda x: re.search(f"{params.segment_average_pattern}", x[0]).group(0)):
+            group_ids.append(i)
             j_ = list(j)
             preds_ = []
             preds = []
@@ -407,10 +407,18 @@ def run(rank, world_size, args):
         avg_dist_ = 6378.1 * angular_distance(Y * (math.pi / 180), X_) / X_.size(0)
         avg_dist = 6378.1 * angular_distance(Y * (math.pi / 180), X) / X.size(0)
         if world_size > 1:
+            np.save(f'{params.exp_dir}/results/tgts_avg_{params.suffix}_{rank}.npy', Y.cpu().numpy())
+            np.save(f'{params.exp_dir}/results/preds_avg_{params.suffix}_{rank}.npy', X_.numpy())
+            np.save(f'{params.exp_dir}/results/ids_avg_{params.suffix}_{rank}.npy', np.array(group_ids))
+            
             with open(params.exp_dir / "results" / f"results_{params.suffix}_{rank}.txt", 'w') as f:
                 print(valid_info, file=f)
                 print(f"seg_averaged_distance: {avg_dist_.sum().item()}", file=f)
         else:
+            np.save(f'{params.exp_dir}/results/tgts_avg_{params.suffix}.npy', Y.cpu().numpy())
+            np.save(f'{params.exp_dir}/results/preds_avg_{params.suffix}.npy', X_.numpy())
+            np.save(f'{params.exp_dir}/results/ids_avg_{params.suffix}.npy', np.array(group_ids))
+
             with open(params.exp_dir / "results" / f"results_{params.suffix}.txt", 'w') as f:
                 print(valid_info, file=f)
                 print(f"seg_averaged_distance: {avg_dist_.sum().item()}", file=f)

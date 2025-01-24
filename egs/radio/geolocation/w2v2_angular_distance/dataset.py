@@ -40,7 +40,9 @@ class GeolocationDataset(torch.utils.data.Dataset):
         cut_transforms: List[Callable[[CutSet], CutSet]] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = AudioSamples(),
-        reverse: float = 0.0,
+        window: float = 0.0,
+        min_duration: float=0.2,
+        reverse: bool = False,
     ):
         super().__init__()
         self.return_cuts = return_cuts
@@ -55,6 +57,8 @@ class GeolocationDataset(torch.utils.data.Dataset):
         # time. It probably could be used as a data perturbation for
         # sequence-level classification tasks, but we have not tested that yet.
         self.reverse = reverse
+        self.window = window
+        self.min_duration = min_duration
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         self._validate(cuts)
@@ -63,15 +67,22 @@ class GeolocationDataset(torch.utils.data.Dataset):
         for tnfm in self.cut_transforms:
             cuts = tnfm(cuts)
         cuts = cuts.sort_by_duration(ascending=False)
-        if self.reverse > 0.0:
+        if self.window > 0.0:
             new_cuts = []
             for c in cuts:
-                new_cuts.append(
-                    reduce(
-                        lambda a, b: a.append(b),
-                        list(c.cut_into_windows(self.reverse))[::-1]
+                if self.reverse:
+                    new_cuts.append(
+                        reduce(
+                            lambda a, b: a.append(b),
+                            list(c.cut_into_windows(self.reverse))[::-1]
+                        )
                     )
-                )
+                else:
+                    c_windows = c.cut_into_windows(self.window)
+                    c_windows = c_windows.filter(
+                        lambda c: c.duration > self.min_duration
+                    )
+                    new_cuts.extend([c for c in c_windows]) 
             cuts = CutSet.from_cuts(new_cuts)
         inputs, input_lens = collate_audio(cuts)
         # Get a tensor with batched feature matrices, shape (B, T, F)

@@ -48,9 +48,16 @@ class GeolocationDataModule:
         )
         group.add_argument(
             "--window-length",
-            type=int,
+            type=float,
             default=10,
             help="Cut chunks into windows of at most this duration. Default=10s"
+        )
+        group.add_argument(
+            "--min-duration",
+            type=float,
+            default=0.2,
+            help="Discard any chunks when creating windows that are shorter than"
+            " this length."
         )
         group.add_argument(
             "--enable-musan",
@@ -186,12 +193,16 @@ class GeolocationDataModule:
                 cut_transforms=transforms,
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=64))),
                 use_feats=self.args.use_feats,
+                window=self.args.window_length,
+                min_duration=self.args.min_duration,
             )
         else:
             train = GeolocationDataset(
                 cut_transforms=transforms,
                 input_transforms=input_transforms,
                 use_feats=self.args.use_feats,
+                window=self.args.window_length,
+                min_duration=self.args.min_duration,
             )
 
         logging.info("Using DynamicBucketingSampler.")
