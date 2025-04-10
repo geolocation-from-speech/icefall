@@ -61,7 +61,7 @@ class GeolocationDataset(torch.utils.data.Dataset):
         self.min_duration = min_duration
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
-        self._validate(cuts)
+        #self._validate(cuts)
         self.hdf5_fix.update()
         cuts = cuts.sort_by_duration(ascending=False)
         for tnfm in self.cut_transforms:
@@ -93,7 +93,7 @@ class GeolocationDataset(torch.utils.data.Dataset):
         for tnfm in self.input_transforms:
             inputs = tnfm(inputs, supervision_segments=segments)
 
-        if cuts[0].supervisions[0].custom is not None:
+        if cuts[0].supervisions[0].custom is not None and 'lat' in cuts[0].supervisions[0].custom:
             targets = torch.Tensor(
                 [
                     [s.custom['lat'], s.custom['lon']]

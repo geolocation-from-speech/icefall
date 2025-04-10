@@ -71,19 +71,19 @@ def main(args):
     )
     out = Path(args.output_cuts)
     out_stem = Path(args.output_cuts.replace(".jsonl.gz", "")).stem
-    window_lengths = [int(w) for w in args.window_lengths.split(",")]
-    for window_length in tqdm(window_lengths):
-        if window_length > 0:
-            cuts_windowed = cuts.cut_into_windows(window_length)
-        else:
-            cuts_windowed = cuts
-       
-        out_window_length = out.with_stem(
-            f"{out_stem}.{window_length}.jsonl"
-        ).with_suffix(".gz")
-        with CutSet.open_writer(out_window_length) as cut_writer:
-            for cut in tqdm(cuts_windowed):
-                cut_writer.write(cut)
+    #window_lengths = [int(w) for w in args.window_lengths.split(",")]
+    #for window_length in tqdm(window_lengths):
+    #    if window_length > 0:
+    #        cuts_windowed = cuts.cut_into_windows(window_length)
+    #    else:
+    #        cuts_windowed = cuts
+    #   
+    #    out_window_length = out.with_stem(
+    #        f"{out_stem}.{window_length}.jsonl"
+    #    ).with_suffix(".gz")
+    #    with CutSet.open_writer(out_window_length) as cut_writer:
+    #        for cut in tqdm(cuts_windowed):
+    #            cut_writer.write(cut)
     
     # Do the valid cuts
     valid_cuts = cuts.filter(lambda c: c.duration >= 2)
