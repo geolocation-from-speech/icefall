@@ -160,8 +160,10 @@ class PiecewiseLinear(object):
                     extra_x_vals.append(extra_x_val)
             if len(extra_x_vals) > 0:
                 x_vals = sorted(set(x_vals + extra_x_vals))
-        y_vals1 = [self(x) for x in x_vals]
-        y_vals2 = [p(x) for x in x_vals]
+
+            y_vals1 = [self(x) for x in x_vals]
+            y_vals2 = [p(x) for x in x_vals]
+
         return (
             PiecewiseLinear(*zip(x_vals, y_vals1)),
             PiecewiseLinear(*zip(x_vals, y_vals2)),
@@ -1635,7 +1637,7 @@ class ActivationDropoutAndLinear(torch.nn.Module):
         self.dropout_shared_dim = dropout_shared_dim
 
     def forward(self, x: Tensor):
-        if torch.jit.is_scripting() or torch.jit.is_tracing():
+        if not self.training or torch.jit.is_scripting() or torch.jit.is_tracing():
             if self.activation == "SwooshL":
                 x = SwooshLForward(x)
             elif self.activation == "SwooshR":
