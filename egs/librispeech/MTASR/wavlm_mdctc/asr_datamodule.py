@@ -25,7 +25,6 @@ from lhotse.dataset import (
     SpecAugment,
 )
 from dataset import K2MultiTalkerSpeechRecognitionDataset 
-from lhotse.dataset.input_strategies import OnTheFlyFeatures
 from lhotse.dataset.sampling.cut_splice import CutSpliceIterable
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
@@ -169,25 +168,9 @@ class LibriSpeechAsrDataModule:
             The state dict for the training sampler.
         """
         input_transforms = []
-        if self.args.enable_spec_aug:
-            logging.info("Enable SpecAugment")
-            logging.info(f"Time warp factor: {self.args.spec_aug_time_warp_factor}")
-            input_transforms.append(
-                SpecAugment(
-                    time_warp_factor=self.args.spec_aug_time_warp_factor,
-                    num_frame_masks=2,
-                    features_mask_size=27,
-                    num_feature_masks=2,
-                    frames_mask_size=100,
-                )
-            )
-        else:
-            logging.info("Disable SpecAugment")
-
         logging.info("About to create train dataset")
         train = K2MultiTalkerSpeechRecognitionDataset(
             cut_transforms=[],
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
             input_transforms=input_transforms,
         )
 
@@ -224,9 +207,8 @@ class LibriSpeechAsrDataModule:
 
     def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
         validate = K2MultiTalkerSpeechRecognitionDataset(
-            return_cuts = self.args.return_cuts, 
+            return_cuts = self.args.return_cuts,
             cut_transforms=[],
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
         )
         
         valid_sampler = DynamicBucketingSampler(
@@ -248,7 +230,6 @@ class LibriSpeechAsrDataModule:
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
         logging.debug("About to create test dataset")
         test = K2MultiTalkerSpeechRecognitionDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
             return_cuts=self.args.return_cuts
         )
         sampler = DynamicBucketingSampler(
@@ -285,7 +266,7 @@ class LibriSpeechAsrDataModule:
             cutset_prefixes=names,
             max_duration=30,
             max_splices=2,
-            min_splices=1,
+            min_splices=2,
             final_max_splices=2,
             final_min_splices=2,
             max_splices_schedule_increment=4e-05,
@@ -294,7 +275,7 @@ class LibriSpeechAsrDataModule:
             max_overlap=[1, 1, 1, 1],
             min_overlap=[0.8, 0.8, 0.8, 0.8],
             max_snr=[30, -30, 0, 0,],
-            normalize_loudness=True,
+            normalize_loudness=False,
             serialize='none',
             sampling_rate=16000,
         )
@@ -344,13 +325,6 @@ class LibriSpeechAsrDataModule:
     def synth_cuts(self) -> CutSet:
         logging.info("About to get snythetic cuts")
         return load_manifest_lazy("data/manifests/cuts_librispeech_dev_synth.jsonl.gz")        
-
-    @lru_cache()
-    def libricss_cuts(self) -> CutSet:
-        logging.info("About to get libricss cuts")
-        cuts = load_manifest_lazy("data/manifests/libricss-ihm-mix_segments_all.jsonl.gz")
-        cuts = cuts.filter(lambda c: c.id.split("_")[1].split("-")[0] != "session0")
-        return cuts
 
     @lru_cache()
     def aed_cuts(self) -> CutSet:

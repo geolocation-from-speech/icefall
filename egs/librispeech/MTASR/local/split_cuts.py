@@ -35,6 +35,7 @@ def main(args):
     odir = Path(args.odir)
     odir.mkdir(mode=511, parents=True, exist_ok=True)
     prefix = f"cuts_{args.oname}" if args.oname is not None else f"cuts"
+    import pdb; pdb.set_trace()
     for cut_idx, cut_set in tqdm(enumerate(cuts.split(args.num_splits))):
         cut_set.to_file(str(odir / f"{prefix}_{cut_idx}.jsonl.gz"))
 

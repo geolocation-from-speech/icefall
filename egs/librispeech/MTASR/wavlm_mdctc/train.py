@@ -48,6 +48,7 @@ from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model import MDCTCModel
 from optim import Eden, LRScheduler, ScaledAdam
+from torch.optim import Adam
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -78,6 +79,8 @@ from icefall.utils import (
 
 from lhotse.utils import compute_num_frames
 import numpy as np
+import torchaudio
+
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, LRScheduler]
 
@@ -91,76 +94,6 @@ def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
             module.batch_count = batch_count
         if hasattr(module, "name"):
             module.name = name
-
-
-def add_model_arguments(parser: argparse.ArgumentParser):
-    parser.add_argument(
-        "--num-encoder-layers",
-        type=str,
-        default="2,4,3,2,4",
-        help="Number of zipformer encoder layers, comma separated.",
-    )
-
-    parser.add_argument(
-        "--feedforward-dims",
-        type=str,
-        default="1024,1024,2048,2048,1024",
-        help="Feedforward dimension of the zipformer encoder layers, comma separated.",
-    )
-
-    parser.add_argument(
-        "--num-heads",
-        type=str,
-        default="8,8,8,8,8",
-        help="Number of attention heads in the zipformer encoder layers.",
-    )
-
-    parser.add_argument(
-        "--encoder-dims",
-        type=str,
-        default="384,384,384,384,384",
-        help="Embedding dimension in the 2 blocks of zipformer encoder layers, comma separated",
-    )
-
-    parser.add_argument(
-        "--attention-dims",
-        type=str,
-        default="192,192,192,192,192",
-        help="""Attention dimension in the 2 blocks of zipformer encoder layers, comma separated;
-        not the same as embedding dimension.""",
-    )
-
-    parser.add_argument(
-        "--encoder-unmasked-dims",
-        type=str,
-        default="256,256,256,256,256",
-        help="Unmasked dimensions in the encoders, relates to augmentation during training.  "
-        "Must be <= each of encoder_dims.  Empirically, less than 256 seems to make performance "
-        " worse.",
-    )
-
-    parser.add_argument(
-        "--zipformer-downsampling-factors",
-        type=str,
-        default="1,2,4,8,2",
-        help="Downsampling factor for each stack of encoder layers.",
-    )
-
-    parser.add_argument(
-        "--cnn-module-kernels",
-        type=str,
-        default="31,31,31,31,31",
-        help="Sizes of kernels in convolution modules",
-    )
-
-    parser.add_argument(
-        "--num-decoder-layers",
-        type=int,
-        default=6,
-        help="""Number of decoder layer of transformer decoder.
-        Setting this to 0 will not create the decoder at all (pure CTC model)
-        """,
-    )
 
 
 def get_parser():
@@ -332,7 +265,31 @@ def get_parser():
         default=250,
         help="The graph compiler collar"
     )
-    add_model_arguments(parser)
+
+    parser.add_argument(
+        "--freeze-lr", type=float, default=0.0001,
+        help="The learning rate used to train new unfrozen parameters that are "
+        "introduced on top of the base wav2vec2 model. We normally first train "
+        "these parameters for some number of iterations/"
+    )
+    
+    parser.add_argument("--freeze-iters", type=int, default=500,
+        help="The number of iterations the base wav2vec2 model is frozen."
+    )
+
+    parser.add_argument(
+        "--pct-start", type=float, default=0.08, help="The percent of steps "
+        "to use as warmup",
+    )
+
+    parser.add_argument(
+        "--total-steps", type=int, default=200000, help="The total number of "
+        "steps for the lr_scheduler",
+    )    
+    
+    parser.add_argument(
+        "--weight-decay", type=float, default=1e-08, help="Adam weight decay",
+    )
 
     return parser
 
@@ -432,37 +389,24 @@ def get_params() -> AttributeDict:
 
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
-    # TODO: We can add an option to switch between Zipformer and Transformer
-    def to_int_tuple(s: str):
-        return tuple(map(int, s.split(",")))
-
-    encoder = Zipformer(
-        num_features=params.feature_dim,
-        output_downsampling_factor=2,
-        zipformer_downsampling_factors=to_int_tuple(
-            params.zipformer_downsampling_factors
-        ),
-        encoder_dims=to_int_tuple(params.encoder_dims),
-        attention_dim=to_int_tuple(params.attention_dims),
-        encoder_unmasked_dims=to_int_tuple(params.encoder_unmasked_dims),
-        nhead=to_int_tuple(params.num_heads),
-        feedforward_dim=to_int_tuple(params.feedforward_dims),
-        cnn_module_kernels=to_int_tuple(params.cnn_module_kernels),
-        num_encoder_layers=to_int_tuple(params.num_encoder_layers),
-    )
-    return encoder
+    bundle = torchaudio.pipelines.WAVLM_BASE_PLUS
+    model = bundle.get_model()
+    x = torch.rand(1, 400)
+    odim = model(x)[0].size(-1)
+    return model, odim
 
 
 def get_mdctc_model(
     params: AttributeDict,
 ) -> nn.Module:
-    encoder = get_encoder_model(params)
+    encoder, encoder_dim = get_encoder_model(params)
 
     model = MDCTCModel(
         encoder=encoder,
-        encoder_dim=int(params.encoder_dims.split(",")[-1]),
+        encoder_dim=encoder_dim,
         vocab_size=params.vocab_size,
     )
+    
     return model
 
 
@@ -645,28 +589,23 @@ def compute_loss(
     feature = batch["inputs"]
     feature_lens = batch["num_frames"].to(device)
     # at entry, feature is (N, T, C)
-    assert feature.ndim == 3
     feature = feature.to(device)
     feature_lens = feature_lens.to(device)
     texts = batch["texts"]
     seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
-        batch['supervisions']['start_frame'][seq_idx == i].tolist()
+        batch['supervisions']['start_sample'][seq_idx == i].tolist()
         for i in range(seq_idx.max()+1)
     ]
     num_frames_init = [
-        batch['supervisions']['num_frames'][seq_idx == i].tolist()
+        batch['supervisions']['num_samples'][seq_idx == i].tolist()
         for i in range(seq_idx.max()+1)
     ]
     #beam_factor = max(0.3, (100000 - params.batch_idx_train)/100000)
     beam_factor = 1
-    import pdb; pdb.set_trace()
     with torch.set_grad_enabled(is_training):
         start = time.time()
-        ctc_output, x_lens = model(
-            feature,
-            feature_lens,
-        )
+        ctc_output, x_lens = model(feature, feature_lens)
         end_nnet = time.time()
         subsampling_factor = params.subsampling_factor
         beam_size = params.beam_size * beam_factor
@@ -768,7 +707,6 @@ def compute_loss(
     avg_num_texts = sum([len(t) for t in texts])/len(texts)
     info["num_texts"] = avg_num_texts * tot_frames
     info["spk_density"] = (sum(densities) / len(densities)) * tot_frames
-    import pdb; pdb.set_trace()
     info["arc_density"] = decoding_graphs.arcs.values().size(0)
     info["pct_ctc"] = ctc_time / total_time * tot_frames
     info["pct_nnet"] = nnet_time / total_time * tot_frames
@@ -831,6 +769,7 @@ def train_one_epoch(
     train_dl: torch.utils.data.DataLoader,
     valid_dl: torch.utils.data.DataLoader,
     scaler: GradScaler,
+    init_lr: float, 
     model_avg: Optional[nn.Module] = None,
     tb_writer: Optional[SummaryWriter] = None,
     world_size: int = 1,
@@ -873,6 +812,14 @@ def train_one_epoch(
     for batch_idx, batch in enumerate(train_dl):
         params.batch_idx_train += 1
         batch_size = batch["num_frames"].size(0)
+        is_frozen = model.module.frozen if isinstance(model, DDP) else model.frozen
+        unfreeze = model.module.unfreeze_encoder if isinstance(model, DDP) else model.unfreeze_encoder
+        if params.batch_idx_train > params.freeze_iters and is_frozen:
+            logging.info("Unfreezing ...")
+            unfreeze()
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = init_lr
+
         try:
             #with torch.cuda.amp.autocast(enabled=params.use_fp16):
             with torch.amp.autocast(**autocast_args):
@@ -892,9 +839,9 @@ def train_one_epoch(
             # NOTE: We use reduction==sum and loss is computed over utterances
             # in the batch and there is no normalization to it so far.
             scaler.scale(loss).backward()
-            set_batch_count(model, params.batch_idx_train)
-            scheduler.step_batch(params.batch_idx_train)
-
+            if not is_frozen:
+                scheduler.step()
+            
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -953,7 +900,7 @@ def train_one_epoch(
                 raise_grad_scale_is_too_small_error(cur_grad_scale)
 
         if batch_idx % params.log_interval == 0:
-            cur_lr = scheduler.get_last_lr()[0]
+            cur_lr = max(scheduler.get_last_lr()) if not is_frozen else params.freeze_lr
             cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
 
             logging.info(
@@ -1060,7 +1007,7 @@ def run(rank, world_size, args):
     if rank == 0:
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
-
+ 
     assert params.start_epoch > 0, params.start_epoch
     checkpoints = load_checkpoint_if_available(
         params=params, model=model, model_avg=model_avg
@@ -1070,24 +1017,48 @@ def run(rank, world_size, args):
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
-
+     
     parameters_names = []
     parameters_names.append(
         [name_param_pair[0] for name_param_pair in model.named_parameters()]
     )
-    optimizer = ScaledAdam(
-        model.parameters(),
+    
+    optimizer = Adam(
+        list(filter(lambda p: p.requires_grad, model.parameters())),
         lr=params.base_lr,
-        clipping_scale=2.0,
-        parameters_names=parameters_names,
+        betas=(0.9, 0.98), eps=1e-08, weight_decay=params.weight_decay, 
     )
+ 
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=params.base_lr,
+        total_steps=params.total_steps,
+        pct_start=params.pct_start,
+        anneal_strategy="cos",
+        div_factor=200,
+    )
+   
+    init_lr = scheduler.get_lr()[0]
+    if params.batch_idx_train < params.freeze_iters:
+        if isinstance(model, DDP):
+            model.module.freeze_encoder()
+        else:
+            model.freeze_encoder()
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = args.freeze_lr 
 
-    scheduler = Eden(
-        optimizer,
-        params.lr_batches,
-        params.lr_epochs,
-        warmup_batches=1000
-    )
+    #optimizer = ScaledAdam(
+    #    model.parameters(),
+    #    lr=params.base_lr,
+    #    clipping_scale=2.0,
+    #    parameters_names=parameters_names,
+    #)
+
+    #scheduler = Eden(
+    #    optimizer,
+    #    params.lr_batches,
+    #    params.lr_epochs,
+    #    warmup_batches=1000
+    #)
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
@@ -1150,7 +1121,6 @@ def run(rank, world_size, args):
         logging.info("Loading grad scaler state dict")
         scaler.load_state_dict(checkpoints["grad_scaler"])
 
-    scheduler.step_epoch(0)
     fix_random_seed(params.seed)
     train_dl.sampler.set_epoch(0)
 
@@ -1169,6 +1139,7 @@ def run(rank, world_size, args):
         tb_writer=tb_writer,
         world_size=world_size,
         rank=rank,
+        init_lr=init_lr,
     )
 
     logging.info("Done!")

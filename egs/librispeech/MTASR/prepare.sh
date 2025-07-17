@@ -178,8 +178,9 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
 
   num_split=1
   # Add option to speed up with grid submission
-  #for ds in train eval; do
-  for ds in eval; do
+  for ds in train eval; do
+    echo "$ds"
+  #for ds in eval; do
     split_dir=data/manifests/audioset_${ds}_split${num_split}
     # We need to normalize the text, create cuts, etc.
     # Make the cuts
@@ -233,7 +234,8 @@ fi
 if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
   # For each language get the text from the cuts
   mkdir -p ${lmdir}
-  for set in librispeech audioset; do
+  #for set in librispeech audioset; do
+  for set in librispeech; do
     echo "Getting text from ${set} ..."
     python local/get_text_from_manifests.py \
       data/manifests/cuts_${set}_train_shuffled.jsonl.gz \
@@ -263,7 +265,7 @@ if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
   num_words=$(cat $langdir/words.txt | wc -l)
   echo "#0 ${num_words}" >> $langdir/words.txt
   
-  nlsyms=( `cat <(grep -o "\[[^][ ]*\]" ${lmdir}/transcript_all_words.txt) <(grep -o "<[^>< ]*>" ${lmdir}/transcript_all_words.txt) | LC_ALL=C sort -u` )
+  nlsyms=( `cat <(echo "[SIL]") <(grep -o "\[[^][ ]*\]" ${lmdir}/transcript_all_words.txt) <(grep -o "<[^>< ]*>" ${lmdir}/transcript_all_words.txt) | LC_ALL=C sort -u` )
   nlsyms=$(echo ${nlsyms[@]} | tr " " ",")
   
   ./local/train_bpe_model.py \

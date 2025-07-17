@@ -119,9 +119,10 @@ class MDCTCModel(nn.Module):
         self,
         encoder: EncoderInterface,
         encoder_dim: int,
-        vocab_size: int,
-        kernel_size: int = 2,
-        stride: int = 2,
+        vocab_size1: int,
+        vocab_size2: int,
+        freeze_feat_extractor: bool = True,
+        spk_weight: float = 0.2,
     ):
         """
         Args:
@@ -134,12 +135,12 @@ class MDCTCModel(nn.Module):
             Number of tokens of the modeling unit including blank.
         """
         super().__init__()
-        assert isinstance(encoder, EncoderInterface), type(encoder)
-
+        # Freeze the feature extractor (CNN frontend)
+        for param in encoder.feature_extractor.parameters():
+            param.requires_grad = False
+        
         # This assertion is to make sure that we upsample by a whole integer
         # value
-        # Lo = (Li−1)×stride − 2×padding + dilation×(kernel_size−1) + output_padding + 1
-        assert (kernel_size - stride) % 2 == 0
         # Adding in transposed convolution
         #self.upsampler = nn.ConvTranspose1d(
         #    encoder_dim,
@@ -151,13 +152,19 @@ class MDCTCModel(nn.Module):
 
         #self.upsampler = GatedUpsampler(encoder_dim)
         #self.upsampler = LinearUpsampler(encoder_dim, stride) 
-        
+        self.spk_weight = spk_weight
+        self.freeze_feat_extractor = freeze_feat_extractor
+        self.frozen = False
         self.encoder = encoder
-        self.ctc_output = nn.Sequential(
+        self.ctc_output1 = nn.Sequential(
             nn.Dropout(p=0.1),
-            nn.Linear(encoder_dim, vocab_size),
-            nn.LogSoftmax(dim=-1),
+            nn.Linear(encoder_dim, vocab_size1),
         )
+        self.ctc_output2 = nn.Sequential(
+            nn.Dropout(p=0.1),
+            nn.Linear(encoder_dim, vocab_size2),
+        )
+        self.log_softmax = nn.LogSoftmax(dim=-1)
 
     @torch.jit.ignore
     def forward(
@@ -187,10 +194,12 @@ class MDCTCModel(nn.Module):
         Returns:
           Return the CTC loss, attention loss, and the total number of frames.
         """
-        assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
+        nnet_output = self.encoder(x)[0]
+        
+        for width, stride in [(10, 5), (3, 2), (3, 2), (3, 2), (3, 2), (2, 2), (2, 2)]:
+            x_lens = torch.floor((x_lens - width) / stride + 1)
 
-        nnet_output, x_lens = self.encoder(x, x_lens)
         assert torch.all(x_lens > 0)
         
         # We will upsample here to handle overlapping speech
@@ -201,6 +210,30 @@ class MDCTCModel(nn.Module):
         #x_lens = x_lens * 2
 
         # compute ctc log-probs
-        ctc_output = self.ctc_output(nnet_output)
+        nnet_output = nnet_output.transpose(1, 2)
+        nnet_output = nn.functional.avg_pool1d(nnet_output, kernel_size=2, stride=2)
+        nnet_output = nnet_output.transpose(1, 2)
+        x_lens = torch.floor((x_lens - 2) / 2 + 1).to(torch.int32)
+        ctc_output1 = self.ctc_output1(nnet_output)
+        ctc_output2 = self.ctc_output2(nnet_output)
+        out = (1-self.spk_weight) * ctc_output1[..., 1:].unsqueeze(-1) + self.spk_weight * ctc_output2.unsqueeze(-2)
+        out = out.reshape(out.size(0), out.size(1), -1)
+        out = torch.cat([ctc_output1[..., 0].unsqueeze(-1), out], dim=-1)
+        out = self.log_softmax(out)
+        return out, x_lens
 
-        return ctc_output, x_lens
+    def freeze_encoder(self):
+        for p in self.encoder.encoder.parameters():
+            if p.requires_grad:
+                p.requires_grad = False
+        self.frozen = True
+
+    def unfreeze_encoder(self):
+        for i, p in enumerate(self.encoder.encoder.parameters()):
+            p.requires_grad = True
+        if self.freeze_feat_extractor:
+            # Freeze the feature extractor (CNN frontend)
+            for param in self.encoder.feature_extractor.parameters():
+                param.requires_grad = False
+        self.frozen = False
+

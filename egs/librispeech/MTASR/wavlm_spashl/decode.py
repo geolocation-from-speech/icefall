@@ -29,7 +29,6 @@ import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from asr_datamodule import LibriSpeechAsrDataModule
 from train import (
-    add_model_arguments,
     get_mdctc_model,
     get_params,
     compute_avg_speaker_density_per_example,
@@ -119,10 +118,8 @@ def get_parser():
     parser.add_argument(
         "--collar",
         type=int,
-        default=400,
+        default=64000,
     )
-
-    add_model_arguments(parser)
 
     return parser
 
@@ -167,7 +164,6 @@ def decode_one_batch(
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
     feature = batch["inputs"]
     feature_lens = batch["num_frames"].to(device)
-    assert feature.ndim == 3
     feature = feature.to(device)
     # at entry, feature is (N, T, C)
 
@@ -176,11 +172,11 @@ def decode_one_batch(
     texts = batch["texts"]
     seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
-        batch['supervisions']['start_frame'][seq_idx == i].tolist()
+        batch['supervisions']['start_sample'][seq_idx == i].tolist()
         for i in range(seq_idx.max()+1)
     ]
     num_frames_init = [
-        batch['supervisions']['num_frames'][seq_idx == i].tolist()
+        batch['supervisions']['num_samples'][seq_idx == i].tolist()
         for i in range(seq_idx.max()+1)
     ]
 
@@ -218,7 +214,7 @@ def decode_one_batch(
     densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
     decoding_graphs = graph_compiler.compile_transcript(texts, start_frames, num_frames_init)
 
-    ctc_output[..., 0] += params.blank_weight
+    ctc_output[..., 0] -= params.blank_weight
     preds = ctc_output.argmax(-1)
     hyps = [
         preds[i].unique_consecutive()[preds[i].unique_consecutive() != 0].squeeze(0).tolist()

@@ -17,7 +17,8 @@ import torch.nn.functional as F
 from torch.utils.data.dataloader import default_collate
 from lhotse import validate
 from lhotse.cut import CutSet
-from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
+from lhotse.dataset.collation import collate_audio
+from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures, AudioSamples
 from lhotse.utils import LOG_EPSILON, compute_num_frames, ifnone
 from lhotse.workarounds import Hdf5MemoryIssueFix
 import re
@@ -126,7 +127,7 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         return_cuts: bool = False,
         cut_transforms: List[Callable[[CutSet], CutSet]] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
-        input_strategy: BatchIO = PrecomputedFeatures(),
+        input_strategy: BatchIO = AudioSamples(),
     ):
         """
         k2 ASR IterableDataset constructor.
@@ -172,18 +173,8 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
 
         # Sort the cuts again after transforms
         cuts = cuts.sort_by_duration(ascending=False)
-
-        # Get a tensor with batched feature matrices, shape (B, T, F)
-        # Collation performs auto-padding, if necessary.
-        input_tpl = self.input_strategy(cuts)
-        if len(input_tpl) == 3:
-            # An input strategy with fault tolerant audio reading mode.
-            # "cuts" may be a subset of the original "cuts" variable,
-            # that only has cuts for which we succesfully read the audio.
-            inputs, _, cuts = input_tpl
-        else:
-            inputs, _ = input_tpl
-
+        inputs, input_lens = collate_audio(cuts)
+        inputs = inputs.to(torch.float32)
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
         # "start_frame/sample" and "num_frames/samples".
@@ -192,13 +183,12 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         # Get the number of frames per audio_cut
         seq_idx = supervision_intervals['sequence_idx']
         num_frames = []
-        fs = self.input_strategy.extractor.frame_shift
-        for c in cuts:
-            nf = compute_num_frames(
-                c.duration, frame_shift=fs, sampling_rate=c.sampling_rate
-            )
-            num_frames.append(min(inputs.size(1), nf))
-        num_frames = torch.LongTensor(num_frames)
+        #for c in cuts:
+        #    nf = compute_num_frames(
+        #        c.duration, frame_shift=fs, sampling_rate=c.sampling_rate
+        #    )
+        #    num_frames.append(min(inputs.size(1), nf))
+        #num_frames = torch.LongTensor(num_frames)
         
         # Apply all available transforms on the inputs, i.e. either audio or features.
         # This could be feature extraction, global MVN, SpecAugment, etc.
@@ -220,13 +210,13 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
                 ]
             ),
             "texts": texts,
-            "num_frames": num_frames,
+            "num_frames": input_lens,
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)
         if self.return_cuts:
             batch["supervisions"]["cut"] = [
-                cut for cut in cuts 
+                cut for cut in cuts
             ]
 
         has_word_alignments = all(

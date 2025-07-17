@@ -41,7 +41,7 @@ import torch
 import k2
 import torch.multiprocessing as mp
 import torch.nn as nn
-from asr_datamodule import LibriSpeechAsrDataModule
+from asr_datamodule2 import LibriSpeechAsrDataModule
 from decoder import Decoder
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
@@ -231,15 +231,15 @@ def get_parser():
         default="data/lang_bpe_5000/bpe.model",
     )
 
-    parser.add_argument(
-        "--lang-dir",
-        type=str,
-        default="data/lang_bpe_5000",
-        help="""The lang dir
-        It contains language related input files such as
-        "lexicon.txt"
-        """,
-    )
+    #parser.add_argument(
+    #    "--lang-dir",
+    #    type=str,
+    #    default="data/lang_bpe_5000",
+    #    help="""The lang dir
+    #    It contains language related input files such as
+    #    "lexicon.txt"
+    #    """,
+    #)
 
     parser.add_argument(
         "--base-lr", type=float, default=0.05, help="The base learning rate."
@@ -326,12 +326,6 @@ def get_parser():
         help="Whether to use half precision training.",
     )
 
-    parser.add_argument(
-        "--collar",
-        type=int,
-        default=250,
-        help="The graph compiler collar"
-    )
     add_model_arguments(parser)
 
     return parser
@@ -407,8 +401,8 @@ def get_params() -> AttributeDict:
             "best_train_epoch": -1,
             "best_valid_epoch": -1,
             "batch_idx_train": 0,
-            "log_interval": 100,
-            "decode_hyp_interval": 200,
+            "log_interval": 1,
+            "decode_hyp_interval": 40,
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
@@ -417,7 +411,7 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             # parameters for loss
-            "beam_size": 24,
+            "beam_size": 10,
             "reduction": "sum",
             "use_double_scores": True,
             # parameters for decoding
@@ -649,7 +643,6 @@ def compute_loss(
     feature = feature.to(device)
     feature_lens = feature_lens.to(device)
     texts = batch["texts"]
-    seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
         batch['supervisions']['start_frame'][seq_idx == i].tolist()
         for i in range(seq_idx.max()+1)
@@ -660,7 +653,6 @@ def compute_loss(
     ]
     #beam_factor = max(0.3, (100000 - params.batch_idx_train)/100000)
     beam_factor = 1
-    import pdb; pdb.set_trace()
     with torch.set_grad_enabled(is_training):
         start = time.time()
         ctc_output, x_lens = model(
@@ -710,9 +702,10 @@ def compute_loss(
 
         # Works with a BPE model
         densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
-        decoding_graphs = graph_compiler.compile(texts, start_frames, num_frames_init)
+        #decoding_graphs = graph_compiler.compile(texts, start_frames, num_frames_init)
         #decoding_graphs = graph_compiler.compile(texts)
 
+        decoding_graphs = batch["graphs"]
         decoding_graphs = decoding_graphs.to(device)
 
         end_sup = time.time()
@@ -723,36 +716,13 @@ def compute_loss(
             allow_truncate=subsampling_factor - 1,
         )
 
-        lattice = k2.intersect_dense(
-            a_fsas=decoding_graphs,
-            b_fsas=dense_fsa_vec,
+        ctc_loss = k2.ctc_loss(
+            decoding_graph=decoding_graphs,
+            dense_fsa_vec=dense_fsa_vec,
             output_beam=beam_size,
-            max_states=25000000,
-            frame_idx_name=None,
+            reduction=reduction,
+            use_double_scores=use_double_scores,
         )
-        #lattice = k2.intersect_dense_pruned(
-        #    decoding_graphs,
-        #    dense_fsa_vec,
-        #    search_beam=20.0,
-        #    output_beam=beam_size,
-        #    min_active_states=60,
-        #    max_active_states=20000, 
-        #)
-        
-        tot_scores = lattice.get_tot_scores(
-            log_semiring=True,
-            use_double_scores=use_double_scores
-        )
-        loss = -1 * tot_scores
-        loss = loss.to(torch.float32) 
-        ctc_loss = loss.sum() 
-        #ctc_loss = k2.ctc_loss(
-        #    decoding_graph=decoding_graphs,
-        #    dense_fsa_vec=dense_fsa_vec,
-        #    output_beam=beam_size,
-        #    reduction=reduction,
-        #    use_double_scores=use_double_scores,
-        #)
         end_ctc = time.time()
         
     nnet_time = end_nnet - start
@@ -768,7 +738,6 @@ def compute_loss(
     avg_num_texts = sum([len(t) for t in texts])/len(texts)
     info["num_texts"] = avg_num_texts * tot_frames
     info["spk_density"] = (sum(densities) / len(densities)) * tot_frames
-    import pdb; pdb.set_trace()
     info["arc_density"] = decoding_graphs.arcs.values().size(0)
     info["pct_ctc"] = ctc_time / total_time * tot_frames
     info["pct_nnet"] = nnet_time / total_time * tot_frames
@@ -982,22 +951,22 @@ def train_one_epoch(
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")
-            valid_info = compute_validation_loss(
-                params=params,
-                model=model,
-                graph_compiler=graph_compiler,
-                valid_dl=valid_dl,
-                world_size=world_size,
-            )
-            model.train()
-            logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
-            logging.info(
-                f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-            )
-            if tb_writer is not None:
-                valid_info.write_summary(
-                    tb_writer, "train/valid_", params.batch_idx_train
-                )
+            #valid_info = compute_validation_loss(
+            #    params=params,
+            #    model=model,
+            #    graph_compiler=graph_compiler,
+            #    valid_dl=valid_dl,
+            #    world_size=world_size,
+            #)
+            #model.train()
+            #logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
+            #logging.info(
+            #    f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+            #)
+            #if tb_writer is not None:
+            #    valid_info.write_summary(
+            #        tb_writer, "train/valid_", params.batch_idx_train
+            #    )
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
@@ -1044,7 +1013,6 @@ def run(rank, world_size, args):
     graph_compiler = MDCTCGraphCompiler(
         params.lang_dir,
         device='cpu',
-        collar=params.collar,
     )
 
     params.vocab_size = graph_compiler.sp.vocab_size()
@@ -1082,12 +1050,7 @@ def run(rank, world_size, args):
         parameters_names=parameters_names,
     )
 
-    scheduler = Eden(
-        optimizer,
-        params.lr_batches,
-        params.lr_epochs,
-        warmup_batches=1000
-    )
+    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs)
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
@@ -1110,7 +1073,6 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    args.return_cuts = False
     librispeech = LibriSpeechAsrDataModule(args)
     train_cuts = librispeech.train_cuts()
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
@@ -1256,7 +1218,7 @@ def main():
     LibriSpeechAsrDataModule.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
-    args.lang_dir = Path(args.lang_dir)
+    #args.lang_dir = Path(args.lang_dir)
 
     world_size = args.world_size
     assert world_size >= 1

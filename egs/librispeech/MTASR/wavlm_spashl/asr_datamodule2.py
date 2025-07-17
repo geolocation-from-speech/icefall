@@ -24,7 +24,8 @@ from lhotse.dataset import (
     PrecomputedFeatures,
     SpecAugment,
 )
-from dataset import K2MultiTalkerSpeechRecognitionDataset 
+from mdctc_graph_compiler2 import MDCTCGraphCompiler
+from dataset2 import K2MultiTalkerSpeechRecognitionDataset 
 from lhotse.dataset.input_strategies import OnTheFlyFeatures
 from lhotse.dataset.sampling.cut_splice import CutSpliceIterable
 from lhotse.utils import fix_random_seed
@@ -155,6 +156,11 @@ class LibriSpeechAsrDataModule:
             default=False,
             help="Normalize the volume of each cutsplice segment",
         )
+        group.add_argument(
+            "--lang-dir",
+            type=Path,
+            default=Path("data/lang_bpe_5000")
+        )
 
     def train_dataloaders(
         self,
@@ -168,6 +174,10 @@ class LibriSpeechAsrDataModule:
           sampler_state_dict:
             The state dict for the training sampler.
         """
+        graph_compiler = MDCTCGraphCompiler(
+            self.args.lang_dir,
+            device='cpu',
+        )
         input_transforms = []
         if self.args.enable_spec_aug:
             logging.info("Enable SpecAugment")
@@ -186,6 +196,7 @@ class LibriSpeechAsrDataModule:
 
         logging.info("About to create train dataset")
         train = K2MultiTalkerSpeechRecognitionDataset(
+            graph_compiler,
             cut_transforms=[],
             input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
             input_transforms=input_transforms,
@@ -223,8 +234,12 @@ class LibriSpeechAsrDataModule:
         return train_dl
 
     def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
+        graph_compiler = MDCTCGraphCompiler(
+            self.args.lang_dir,
+            device='cpu',
+        )
         validate = K2MultiTalkerSpeechRecognitionDataset(
-            return_cuts = self.args.return_cuts, 
+            graph_compiler,
             cut_transforms=[],
             input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
         )
@@ -284,15 +299,12 @@ class LibriSpeechAsrDataModule:
             cutset_weights=weights,
             cutset_prefixes=names,
             max_duration=30,
-            max_splices=2,
-            min_splices=1,
-            final_max_splices=2,
-            final_min_splices=2,
-            max_splices_schedule_increment=4e-05,
-            min_splices_schedule_increment=4e-05,
+            max_splices=3,
+            final_max_splices=5,
+            splices_schedule_increment=4e-05,
             max_unique=4,
             max_overlap=[1, 1, 1, 1],
-            min_overlap=[0.8, 0.8, 0.8, 0.8],
+            min_overlap=[0.05, 0.05, 0.05, 0.05],
             max_snr=[30, -30, 0, 0,],
             normalize_loudness=True,
             serialize='none',
@@ -304,8 +316,8 @@ class LibriSpeechAsrDataModule:
     def valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
         cut_info = [
-            ('test-clean', 0.5, "./data/manifests/cuts_librispeech_test-clean.jsonl.gz"),
-            ('test-clean', 0.5, "./data/manifests/cuts_librispeech_test-clean.jsonl.gz"),
+            ('dev-clean', 0.5, "./data/manifests/cuts_librispeech_dev-other.jsonl.gz"),
+            ('dev-other', 0.5, "./data/manifests/cuts_librispeech_dev-clean.jsonl.gz"),
         ]
         cutsets, weights, names = [], [], []
         for n, w, p in cut_info: 
@@ -318,12 +330,11 @@ class LibriSpeechAsrDataModule:
             cutset_weights=weights,
             cutset_prefixes=names,
             max_duration=30,
-            max_splices=2,
-            min_splices=2,
+            max_splices=4,
             max_overlap=[1, 1],
-            min_overlap=[0.8, 0.8],
-            max_snr=[0, 0],
-            final_max_splices=2,
+            min_overlap=[0.5, 0.5],
+            max_snr=[30, -30],
+            final_max_splices=4,
             max_unique=2,
             normalize_loudness=True,
             serialize='none',
@@ -343,14 +354,7 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def synth_cuts(self) -> CutSet:
         logging.info("About to get snythetic cuts")
-        return load_manifest_lazy("data/manifests/cuts_librispeech_dev_synth.jsonl.gz")        
-
-    @lru_cache()
-    def libricss_cuts(self) -> CutSet:
-        logging.info("About to get libricss cuts")
-        cuts = load_manifest_lazy("data/manifests/libricss-ihm-mix_segments_all.jsonl.gz")
-        cuts = cuts.filter(lambda c: c.id.split("_")[1].split("-")[0] != "session0")
-        return cuts
+        return load_manifest_lazy("data/manifests/cuts_dev.jsonl.gz")        
 
     @lru_cache()
     def aed_cuts(self) -> CutSet:

@@ -111,15 +111,21 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--blank-weight",
-        type=float,
-        default=0,
-    )
-
-    parser.add_argument(
         "--collar",
         type=int,
         default=400,
+    )
+
+    parser.add_argument(
+        "--frame-duration",
+        type=int,
+        default=0.04
+    )
+
+    parser.add_argument(
+        "--beam-size",
+        type=int,
+        default=24,
     )
 
     add_model_arguments(parser)
@@ -127,7 +133,7 @@ def get_parser():
     return parser
 
 
-def decode_one_batch(
+def align_one_batch(
     params: AttributeDict,
     model: nn.Module,
     graph_compiler: MDCTCGraphCompiler,
@@ -216,29 +222,59 @@ def decode_one_batch(
 
     # Works with a BPE model
     densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
-    decoding_graphs = graph_compiler.compile_transcript(texts, start_frames, num_frames_init)
+    decoding_graphs = graph_compiler.compile(texts, start_frames, num_frames_init)
+    decoding_graphs = decoding_graphs.to(device)
+    dense_fsa_vec = k2.DenseFsaVec(
+        ctc_output.float(),
+        supervision_segments.cpu(),
+        allow_truncate=subsampling_factor - 1,
+    )
 
-    ctc_output[..., 0] += params.blank_weight
-    preds = ctc_output.argmax(-1)
-    hyps = [
-        preds[i].unique_consecutive()[preds[i].unique_consecutive() != 0].squeeze(0).tolist()
-        for i in range(preds.size(0))
-    ]
-
+    
+    lattice = k2.intersect_dense(
+        a_fsas=decoding_graphs,
+        b_fsas=dense_fsa_vec,
+        output_beam=params.beam_size,
+        max_states=25000000,
+        frame_idx_name=None,
+    )
+   
+    best_path = k2.shortest_path(lattice, use_double_scores=True) 
     cut_ids = [c.id for c in batch["supervisions"]["cut"]]
-    errors, total, ter, alis, dels, ins, subs, corr = asclite.compute_ter(decoding_graphs, hyps)
-    tokens = {}
-    for idx, (hyp_ids, ref_ids) in enumerate(alis):
-        tokens_ = []
-        for i, j in zip(hyp_ids, ref_ids):
-            h = graph_compiler.sp.id_to_piece(i)
-            r = graph_compiler.sp.id_to_piece(j)
-            tokens_.append([h, r])
-        tokens[cut_ids[idx]] = tokens_
-    return errors, total, ter, tokens, dels, ins, subs, corr
+    alignments = {}
+    for i in range(best_path.shape[0]):
+        t = best_path[i].aux_labels[:-1] 
+        nonzero_indices = torch.nonzero(t, as_tuple=False).squeeze()
+        nonzero_values = t[nonzero_indices]
+
+        # Compute steps to next non-zero
+        next_nonzero = torch.roll(nonzero_indices, shifts=-1)
+        steps = next_nonzero - nonzero_indices
+        steps[-1] = -1  # Last element has no next non-zero
+        steps -= 1 # just to pad
+
+        pieces = [
+            graph_compiler.sp.id_to_piece(p)
+            for p in nonzero_values.tolist()
+        ]
+
+        starts = [
+            round(s, 1)
+            for s in (nonzero_indices * params.frame_duration).tolist()
+        ]
+
+        durs = [
+            round(d + 0.2, 1)
+            for d in (steps * params.frame_duration).tolist()
+        ]
+        # Combine into list of tuples
+        result = list(zip(pieces, starts, durs))
+        alignments[cut_ids[i]] = result
+    
+    return alignments 
 
 
-def decode_dataset(
+def align_dataset(
     dl: torch.utils.data.DataLoader,
     params: AttributeDict,
     model: nn.Module,
@@ -269,41 +305,17 @@ def decode_dataset(
     except TypeError:
         num_batches = "?"
 
-    results = defaultdict(list)
-    ters = []
-    errors = 0
-    total = 0
-    dels, ins, subs, corr = 0, 0, 0, 0
-    tokens = {}
+    alignments = {}
     for batch_idx, batch in tqdm(enumerate(dl)):
         texts = batch["supervisions"]["text"]
-        errors_, total_, ter, tokens_, d, i, s, c = decode_one_batch(
+        alis = align_one_batch(
             params=params,
             model=model,
             graph_compiler=graph_compiler,
             batch=batch,
         )
-        ters.append(ter)
-        tokens.update(tokens_)
-        errors += errors_
-        total += total_
-        dels += d
-        ins += i
-        subs += s
-        corr += c
-        batch_str = f"{batch_idx}/{num_batches}"
-        logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
-        logging.info(f"ter: {ter}")
-    results["ter"] = errors / total
-    results["ter_indv"] = ters
-    results["errors"] = errors
-    results["total"] = total
-    results["dels"] = dels
-    results["ins"] = ins
-    results["subs"] = subs
-    results["corr"] = corr
-    return results, tokens
-
+        alignments.update(alis)
+    return alignments
 
 
 @torch.no_grad()
@@ -424,41 +436,27 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
-    valid_cuts = librispeech.synth_cuts()
-    #valid_cuts = librispeech.libricss_cuts()
+    #valid_cuts = librispeech.synth_cuts()
+    valid_cuts = librispeech.libricss_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
     test_sets = ["valid",]
     test_dl = [valid_dl,]
 
     for set, dl in zip(test_sets, test_dl):
-        results_dict, tokens = decode_dataset(
+        alignments = align_dataset(
             dl=dl,
             params=params,
             model=model,
             graph_compiler=graph_compiler,
         )
     
-    decode_dir = params.exp_dir / "decode"
-    decode_dir.mkdir(parents=True, exist_ok=True)
-    with open(decode_dir / f"results_chkpt{params.iter}_avg{params.avg}_{params.suffix}_collar{params.collar}.json", "w") as f:
-        json.dump(results_dict, f, indent=4)    
-    
-    with open(decode_dir / f"alignments_chkpt{params.iter}_avg{params.avg}_{params.suffix}.txt", "w") as f:
-        for uttid in tokens:
-            seq = tokens[uttid]
-            hyp_tokens = [pair[0] for pair in seq]
-            ref_tokens = [pair[1] for pair in seq]
-            widths = [max(len(h), len(r)) for h, r in zip(hyp_tokens, ref_tokens)]
-            # Pad each token to column width
-            ref_line = "ref: " + "  ".join(r.ljust(w) for r, w in zip(ref_tokens, widths))
-            hyp_line = "hyp: " + "  ".join(h.ljust(w) for h, w in zip(hyp_tokens, widths))
-            print(ref_line, file=f)
-            print(hyp_line, file=f)
-            print("", file=f)
-	
-    with open(decode_dir / f"alignments_chkpt{params.iter}_avg{params.avg}_{params.suffix}.json", "w") as f:
-        json.dump(tokens, f, indent=4)
+    ali_dir = params.exp_dir / "align"
+    ali_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"alignments_chkpt{params.iter}_avg{params.avg}_collar{params.collar}_{params.suffix}.json"
+    with open(ali_dir / fname, "w") as f:
+        json.dump(alignments, f, indent=4)			
+            
      
     logging.info("Done!")
 

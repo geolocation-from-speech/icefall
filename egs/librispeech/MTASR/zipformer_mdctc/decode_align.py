@@ -216,7 +216,37 @@ def decode_one_batch(
 
     # Works with a BPE model
     densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
-    decoding_graphs = graph_compiler.compile_transcript(texts, start_frames, num_frames_init)
+    
+    # Get best alignment
+    decoding_graphs = graph_compiler.compile(texts, start_frames, num_frames_init)
+    #decoding_graphs = graph_compiler.compile_transcript(texts, start_frames, num_frames_init)
+    decoding_graphs = decoding_graphs.to(device)
+    dense_fsa_vec = k2.DenseFsaVec(
+        ctc_output.float(),
+        supervision_segments.cpu(),
+        allow_truncate=subsampling_factor - 1,
+    )
+
+    # Use a small output beam
+    lattice = k2.intersect_dense_pruned(
+        a_fsas=decoding_graphs,
+        b_fsas=dense_fsa_vec,
+        search_beam=20,
+        output_beam=2,
+        max_active_states=10000000,
+        min_active_states=700000,
+        frame_idx_name=None,
+    )
+  
+    # Convert the lattice to text lattice
+    best_path = k2.shortest_path(lattice, use_double_scores=True) 
+    best_path = k2.invert(best_path)
+    best_path.aux_labels = None
+    best_path = k2.remove_epsilon(best_path)
+    best_path = k2.connect(best_path)
+    best_path = k2.arc_sort(best_path)
+
+    # Score against the best alignment
 
     ctc_output[..., 0] += params.blank_weight
     preds = ctc_output.argmax(-1)
@@ -226,7 +256,7 @@ def decode_one_batch(
     ]
 
     cut_ids = [c.id for c in batch["supervisions"]["cut"]]
-    errors, total, ter, alis, dels, ins, subs, corr = asclite.compute_ter(decoding_graphs, hyps)
+    errors, total, ter, alis, dels, ins, subs, corr = asclite.compute_ter(best_path, hyps)
     tokens = {}
     for idx, (hyp_ids, ref_ids) in enumerate(alis):
         tokens_ = []
@@ -424,8 +454,8 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
-    valid_cuts = librispeech.synth_cuts()
-    #valid_cuts = librispeech.libricss_cuts()
+    #valid_cuts = librispeech.synth_cuts()
+    valid_cuts = librispeech.libricss_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
     test_sets = ["valid",]

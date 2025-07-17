@@ -123,6 +123,7 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
+        graph_compiler,
         return_cuts: bool = False,
         cut_transforms: List[Callable[[CutSet], CutSet]] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
@@ -149,7 +150,7 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         self.cut_transforms = ifnone(cut_transforms, [])
         self.input_transforms = ifnone(input_transforms, [])
         self.input_strategy = input_strategy
-
+        self.graph_compiler = graph_compiler 
         # This attribute is a workaround to constantly growing HDF5 memory
         # throughout the epoch. It regularly closes open file handles to
         # reset the internal HDF5 caches.
@@ -206,7 +207,21 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         for tnfm in self.input_transforms:
             inputs = tnfm(inputs, supervision_segments=segments)
 
+        
         texts = extract_texts_from(cuts)
+        seq_idx = supervision_intervals['sequence_idx']
+        start_frames = [
+            supervision_intervals['start_frame'][seq_idx == i].tolist()
+            for i in range(seq_idx.max()+1)
+        ]
+        num_frames_init = [
+            supervision_intervals['num_frames'][seq_idx == i].tolist()
+            for i in range(seq_idx.max()+1)
+        ]
+
+        decoding_graphs = self.graph_compiler.compile(
+            texts, start_frames, num_frames_init
+        )
 
         batch = {
             "inputs": inputs,
@@ -221,12 +236,13 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
             ),
             "texts": texts,
             "num_frames": num_frames,
+            "graphs": decoding_graphs,
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)
         if self.return_cuts:
             batch["supervisions"]["cut"] = [
-                cut for cut in cuts 
+                cut for cut in cuts for sup in cut.supervisions
             ]
 
         has_word_alignments = all(
