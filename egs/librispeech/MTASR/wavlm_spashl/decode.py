@@ -112,7 +112,7 @@ def get_parser():
     parser.add_argument(
         "--blank-weight",
         type=float,
-        default=0,
+        default=0.0,
     )
 
     parser.add_argument(
@@ -121,7 +121,116 @@ def get_parser():
         default=64000,
     )
 
+    parser.add_argument(
+        "--max-num-spks",
+        type=int,
+        default=2,
+    )
+
+    parser.add_argument(
+        "--use-hat",
+        type=str2bool,
+        default=False,
+    )
+
+    parser.add_argument(
+        "--use-layer-norm",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--frame-duration",
+        type=int,
+        default=0.04,
+    )
+
     return parser
+
+
+def get_nonzero_span_starts(batch, params):
+    # batch shape: [B, T]
+    B, T = batch.shape
+
+    # Shift the input right by 1 along time dimension, prepend zeros
+    shifted = torch.cat(
+        [
+            torch.zeros(B, 1, dtype=batch.dtype).to(batch.device),
+            batch[:, :-1]
+        ], dim=1
+    )
+
+    # Find where a new span starts: nonzero & (value != previous or previous was zero)
+    is_new_span = (batch != 0) & ((shifted != batch) | (shifted == 0))
+
+    # For each batch, get the indices where this is true
+    result = [
+        torch.nonzero(seq, as_tuple=False).squeeze(1) * params.frame_duration
+        for seq in is_new_span
+    ]
+
+    return result
+
+
+def merge_bpe_with_times(sp, tokens, times, max_time):
+    assert len(tokens) == len(times), "Tokens and times must match in length"
+    words = []
+    current_word = ''
+    current_time = None
+
+    for token_, time in zip(tokens, times):
+        token = sp.id_to_piece(token_.item())
+        if token.startswith('▁') or not current_word:  # new word
+            if current_word:
+                words.append(
+                    (
+                        current_word,
+                        round(current_time, 2),
+                        round(time - current_time, 2)
+                    )
+                )
+            current_word = token.lstrip('▁')
+            current_time = time
+        else:
+            current_word += token
+    if current_word:
+        words.append(
+            (
+                current_word,
+                round(current_time, 2),
+                round(min(time + 0.5, max_time.item()) - current_time, 2)
+            )
+        )
+
+    return words
+
+
+def hyp_to_stm(hyp, cut_idx):
+    utts = []
+    for s in hyp:
+        entry = {
+            "session_id": cut_idx,
+            "words": " ".join([w[0] for w in hyp[s]]),
+            "speaker": str(s),
+            "start_time": round(hyp[s][0][1], 2),
+            "end_time": round(hyp[s][-1][1] + hyp[s][-1][2], 2),
+        }
+        utts.append(entry)
+    return utts
+
+
+def ref_to_stm(ref, cut_idx):
+    utts = []
+    for s in ref:
+        entry = {
+            "session_id": cut_idx,
+            "words": ref[s][0],
+            "speaker": str(s),
+            "start_time": round(ref[s][1], 2),
+            "end_time": round(ref[s][1] + ref[s][2], 2),
+        }
+        utts.append(entry)
+    return utts
 
 
 def decode_one_batch(
@@ -169,7 +278,8 @@ def decode_one_batch(
 
     supervisions = batch["supervisions"]
     feature = feature.to(device)
-    texts = batch["texts"]
+    texts = [[t.strip() for t in b] for b in batch["texts"]]
+    speakers = batch["speakers"]
     seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
         batch['supervisions']['start_sample'][seq_idx == i].tolist()
@@ -212,26 +322,59 @@ def decode_one_batch(
 
     # Works with a BPE model
     densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
-    decoding_graphs = graph_compiler.compile_transcript(texts, start_frames, num_frames_init)
+    #decoding_graphs = graph_compiler.compile_transcript(texts, start_frames, num_frames_init)
 
     ctc_output[..., 0] -= params.blank_weight
     preds = ctc_output.argmax(-1)
+    times = get_nonzero_span_starts(preds, params)
     hyps = [
-        preds[i].unique_consecutive()[preds[i].unique_consecutive() != 0].squeeze(0).tolist()
+        preds[i].unique_consecutive(dim=-1)[preds[i].unique_consecutive(dim=-1) != 0].squeeze(0)
         for i in range(preds.size(0))
     ]
-
+    spks = [
+        hyps[i] // (params.vocab_size - 1)
+        for i in range(preds.size(0))
+    ]
+    units = [
+        hyps[i].remainder((params.vocab_size - 1))
+        for i in range(preds.size(0))
+    ]
+    
     cut_ids = [c.id for c in batch["supervisions"]["cut"]]
-    errors, total, ter, alis, dels, ins, subs, corr = asclite.compute_ter(decoding_graphs, hyps)
     tokens = {}
-    for idx, (hyp_ids, ref_ids) in enumerate(alis):
-        tokens_ = []
-        for i, j in zip(hyp_ids, ref_ids):
-            h = graph_compiler.sp.id_to_piece(i)
-            r = graph_compiler.sp.id_to_piece(j)
-            tokens_.append([h, r])
-        tokens[cut_ids[idx]] = tokens_
-    return errors, total, ter, tokens, dels, ins, subs, corr
+    for i, (cut_id, s, u, t) in enumerate(zip(cut_ids, spks, units, times)):
+        spk2int = {k: j for j, k in enumerate(dict.fromkeys(speakers[i]))}
+        int2spk = {j: k for k, j in spk2int.items()}
+        speaker_hyps = {}
+        speaker_refs = {}
+        for s_i in range(params.max_num_spks): 
+            if s_i in s:
+                speaker_hyps[s_i] = merge_bpe_with_times(
+                    graph_compiler.sp,
+                    u[s == s_i],
+                    [t_.item() for t_ in t[s == s_i]],
+                    x_lens[i]*params.frame_duration
+                )
+            if s_i in int2spk: 
+                text_i = []
+                found_start = False
+                curr_dur = 0
+                for j, (text, spk) in enumerate(zip(texts[i], speakers[i])):
+                    if spk2int[spk] == s_i:
+                        if not found_start:
+                            start_i = start_frames[i][j]
+                            found_start = True
+                        curr_dur = start_frames[i][j] + num_frames_init[i][j]
+                        text_i.append(text)
+                text_i = " ".join(text_i)
+                speaker_refs[s_i] = (
+                    graph_compiler.sp.decode(text_i),
+                    start_i * (1/16000),
+                    curr_dur * (1/16000),
+                )
+        stm_hyp = hyp_to_stm(speaker_hyps, cut_id)
+        stm_ref = ref_to_stm(speaker_refs, cut_id)
+        yield stm_hyp, stm_ref
 
 
 def decode_dataset(
@@ -266,39 +409,22 @@ def decode_dataset(
         num_batches = "?"
 
     results = defaultdict(list)
-    ters = []
-    errors = 0
-    total = 0
-    dels, ins, subs, corr = 0, 0, 0, 0
-    tokens = {}
+    hyps, refs = [], []
     for batch_idx, batch in tqdm(enumerate(dl)):
         texts = batch["supervisions"]["text"]
-        errors_, total_, ter, tokens_, d, i, s, c = decode_one_batch(
-            params=params,
-            model=model,
-            graph_compiler=graph_compiler,
-            batch=batch,
-        )
-        ters.append(ter)
-        tokens.update(tokens_)
-        errors += errors_
-        total += total_
-        dels += d
-        ins += i
-        subs += s
-        corr += c
+        for hyps_, refs_ in decode_one_batch(
+                params=params,
+                model=model,
+                graph_compiler=graph_compiler,
+                batch=batch,
+            ):
+            hyps.extend(hyps_)
+            refs.extend(refs_)
         batch_str = f"{batch_idx}/{num_batches}"
         logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
-        logging.info(f"ter: {ter}")
-    results["ter"] = errors / total
-    results["ter_indv"] = ters
-    results["errors"] = errors
-    results["total"] = total
-    results["dels"] = dels
-    results["ins"] = ins
-    results["subs"] = subs
-    results["corr"] = corr
-    return results, tokens
+    hyps = sorted(hyps, key=lambda x: (x["session_id"], x["start_time"]))
+    refs = sorted(refs, key=lambda x: (x["session_id"], x["start_time"]))
+    return hyps, refs
 
 
 
@@ -421,14 +547,16 @@ def main():
     librispeech = LibriSpeechAsrDataModule(args)
 
     valid_cuts = librispeech.synth_cuts()
+    #test_other_cuts, test_clean_cuts = librispeech.single_speaker_cuts()
     #valid_cuts = librispeech.libricss_cuts()
+    #valid_cuts = librispeech.libri2mix_test_clean_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
     test_sets = ["valid",]
     test_dl = [valid_dl,]
 
     for set, dl in zip(test_sets, test_dl):
-        results_dict, tokens = decode_dataset(
+        hyps, refs = decode_dataset(
             dl=dl,
             params=params,
             model=model,
@@ -437,25 +565,14 @@ def main():
     
     decode_dir = params.exp_dir / "decode"
     decode_dir.mkdir(parents=True, exist_ok=True)
-    with open(decode_dir / f"results_chkpt{params.iter}_avg{params.avg}_{params.suffix}_collar{params.collar}.json", "w") as f:
-        json.dump(results_dict, f, indent=4)    
+    with open(decode_dir / f"hyps_chkpt{params.iter}_avg{params.avg}_{params.suffix}.stm", "w") as f:
+        for l in hyps:
+            print(f"{l['session_id']} 1 {l['speaker']} {l['start_time']} {l['end_time']} {l['words']}", file=f)
     
-    with open(decode_dir / f"alignments_chkpt{params.iter}_avg{params.avg}_{params.suffix}.txt", "w") as f:
-        for uttid in tokens:
-            seq = tokens[uttid]
-            hyp_tokens = [pair[0] for pair in seq]
-            ref_tokens = [pair[1] for pair in seq]
-            widths = [max(len(h), len(r)) for h, r in zip(hyp_tokens, ref_tokens)]
-            # Pad each token to column width
-            ref_line = "ref: " + "  ".join(r.ljust(w) for r, w in zip(ref_tokens, widths))
-            hyp_line = "hyp: " + "  ".join(h.ljust(w) for h, w in zip(hyp_tokens, widths))
-            print(ref_line, file=f)
-            print(hyp_line, file=f)
-            print("", file=f)
-	
-    with open(decode_dir / f"alignments_chkpt{params.iter}_avg{params.avg}_{params.suffix}.json", "w") as f:
-        json.dump(tokens, f, indent=4)
-     
+    with open(decode_dir / f"refs_chkpt{params.iter}_avg{params.avg}_{params.suffix}.stm", "w") as f:
+        for l in refs:
+            print(f"{l['session_id']} 1 {l['speaker']} {l['start_time']} {l['end_time']} {l['words']}", file=f)
+
     logging.info("Done!")
 
 

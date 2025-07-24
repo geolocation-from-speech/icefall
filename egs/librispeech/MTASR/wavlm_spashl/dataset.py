@@ -182,7 +182,6 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         
         # Get the number of frames per audio_cut
         seq_idx = supervision_intervals['sequence_idx']
-        num_frames = []
         #for c in cuts:
         #    nf = compute_num_frames(
         #        c.duration, frame_shift=fs, sampling_rate=c.sampling_rate
@@ -196,7 +195,15 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         for tnfm in self.input_transforms:
             inputs = tnfm(inputs, supervision_segments=segments)
 
-        texts = extract_texts_from(cuts)
+        texts = [
+            [s.text for s in sorted(c.supervisions, key=lambda x: x.start)]
+            for c in cuts
+        ]
+
+        speakers = [
+            [s.speaker if s.speaker is not None else "noise" for s in sorted(c.supervisions, key=lambda x: x.start)]
+            for c in cuts
+        ]
 
         batch = {
             "inputs": inputs,
@@ -210,6 +217,7 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
                 ]
             ),
             "texts": texts,
+            "speakers": speakers,
             "num_frames": input_lens,
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples

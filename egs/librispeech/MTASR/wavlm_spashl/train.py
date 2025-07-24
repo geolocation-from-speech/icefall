@@ -283,7 +283,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--total-steps", type=int, default=200000, help="The total number of "
+        "--total-steps", type=int, default=100000, help="The total number of "
         "steps for the lr_scheduler",
     )    
     
@@ -296,12 +296,25 @@ def get_parser():
         type=int,
         default=2,
     )
-    
+
     parser.add_argument(
-        "--spk-weight",
-        type=float,
-        default=0.5,
+        "--use-hat",
+        type=str2bool,
+        default=False,
     )
+   
+    parser.add_argument(
+        "--use-layer-norm",
+        type=str2bool,
+        default=False,
+    )
+
+    parser.add_argument(
+        "--use-large",
+        type=str2bool,
+        default=False,
+    )
+    
     return parser
 
 
@@ -400,7 +413,10 @@ def get_params() -> AttributeDict:
 
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
-    bundle = torchaudio.pipelines.WAVLM_BASE_PLUS
+    if params.use_large:
+        bundle = torchaudio.pipelines.WAVLM_LARGE
+    else:
+        bundle = torchaudio.pipelines.WAVLM_BASE_PLUS
     model = bundle.get_model()
     x = torch.rand(1, 400)
     odim = model(x)[0].size(-1)
@@ -417,7 +433,8 @@ def get_mdctc_model(
         encoder_dim=encoder_dim,
         vocab_size1=params.vocab_size,
         vocab_size2=params.max_num_spks,
-        spk_weight=params.spk_weight,
+        hat=params.use_hat,
+        layer_norm=params.use_layer_norm,
     )
     
     return model
@@ -605,6 +622,7 @@ def compute_loss(
     feature = feature.to(device)
     feature_lens = feature_lens.to(device)
     texts = batch["texts"]
+    speakers = batch["speakers"]
     seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
         batch['supervisions']['start_sample'][seq_idx == i].tolist()
@@ -642,7 +660,25 @@ def compute_loss(
                 hyps.append(hyps_)
                 spk_hyps.append(spks.view(-1).tolist())
 
+            # Construct the speaker ref
+            text_lens = []
+            num_frames_ref, num_tokens_ref = 0, 0
+            for t_idx in range(len(texts[0])): 
+                text_lens.append(start_frames[0][t_idx] + num_frames_init[0][t_idx])
+                num_frames_ref += num_frames_init[0][t_idx]
+                num_tokens_ref += len(graph_compiler.sp.encode(texts[0][t_idx]))
+            max_len = max(text_lens)
+            frames_per_token = num_frames_ref // num_tokens_ref + 1
+            start_tokens = [start_frames[0][t_idx] // frames_per_token for t_idx in range(len(texts[0]))]
+            spk2int = {k: i for i, k in enumerate(dict.fromkeys(speakers[0]))}
+
             logging.info(f" ===================================== " )
+            logging.info(f"spk_ref: ")
+            for t_idx, st in enumerate(start_tokens):
+                blanks = " "*st
+                tokens = str(spk2int[speakers[0][t_idx]])*len(graph_compiler.sp.encode(texts[0][t_idx]))
+                logging.info(f"{blanks}{tokens}")
+            logging.info(f" ---------------")
             logging.info(f"spk_hyp: {"".join(map(str, spk_hyps[0]))}")
             for t_idx in range(len(hyps[0])):
                 logging.info(f"hyp_{t_idx}: {graph_compiler.sp.decode(hyps[0][t_idx])}")
@@ -674,7 +710,9 @@ def compute_loss(
 
         # Works with a BPE model
         densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
-        decoding_graphs = graph_compiler.compile(texts, start_frames, num_frames_init)
+        decoding_graphs = graph_compiler.compile(
+            texts, start_frames, num_frames_init, speakers,
+        )
         #decoding_graphs = graph_compiler.compile(texts)
 
         decoding_graphs = decoding_graphs.to(device)
@@ -1127,8 +1165,8 @@ def run(rank, world_size, args):
         # an utterance duration distribution for your dataset to select
         # the threshold
         return (
-            1.0 <= c.duration <= 30.0 and
-            sum(len(s.text) for s in c.supervisions) <= 400
+            1.0 <= c.duration <= 90.0
+            #and sum(len(s.text) for s in c.supervisions) <= 400
         )
 
     train_cuts = train_cuts.filter(remove_short_and_long_utt)

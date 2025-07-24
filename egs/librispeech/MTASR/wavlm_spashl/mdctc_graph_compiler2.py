@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Union, Optional, List, Tuple, Dict
 import torch
 from collections import defaultdict, deque
+from itertools import groupby
 
 
 # For now, this only works on CPU as far as I can tell
@@ -105,6 +106,8 @@ class MDCTCGraphCompiler(object):
         c: List[str],
         offsets: List[int],
         lens: List[int],
+        spks: List[int],
+        spk2int: Dict,
     ) -> Tuple[List[List[str]], List[Tuple[str, str]], Dict[str, int]]:
         """
             Generate a list of token-level labels and precedence constraints for a sequence.
@@ -139,11 +142,11 @@ class MDCTCGraphCompiler(object):
         token_start_times = {}
         pos_sym_to_sym = {}
         seqs = []
-        for i, (s, o, l) in enumerate(zip(self.sp.encode(c), offsets, lens)):
+        for i, (s, o, l, spk) in enumerate(zip(self.sp.encode(c), offsets, lens, spks)):
             samples_per_token  = l // len(s) + 1
             labels = []
             for j, token in enumerate(s):
-                pos_sym = (token, i, j)
+                pos_sym = (token, spk2int[spk], j)
                 pos_sym_to_sym[pos_sym] = token
                 token_start_times[pos_sym] = o + j*samples_per_token
                 labels.append(pos_sym)
@@ -166,7 +169,14 @@ class MDCTCGraphCompiler(object):
         #print(f"num_constraints: {num_constraints}")
         return seqs, constraints, pos_sym_to_sym
 
-    def compile(self, cuts: List[List[str]], offsets, lens, debug: bool = False) -> k2.Fsa:
+    def compile(
+        self,
+        cuts: List[List[str]],
+        offsets,
+        lens,
+        spks,
+        debug: bool = False
+    ) -> k2.Fsa:
         """
             Compile a batch of transcripts into CTC-constrained decoding graphs.
 
@@ -181,14 +191,18 @@ class MDCTCGraphCompiler(object):
             :type offsets: List[List[int]] or compatible structure
             :param lens: A batch of lengths (e.g., in frames or tokens) for each token in each transcript.
             :type lens: List[List[int]] or compatible structure
+            :param spks: A batch of lists of speaker labels
             :param debug: Flag for debugging outputs
             :type debug: bool
             :return: A batched FSA (`FsaVec`) representing all input transcripts composed with a CTC topology.
             :rtype: k2.Fsa
-        """ 
+        """
         graphs = []
-        for c, o, l in zip(cuts, offsets, lens):
-            seqs, constraints, sym_map = self.get_seqs_and_constraints(c, o, l)
+        for c, o, l, spk in zip(cuts, offsets, lens, spks):
+            spk2int = {k: i for i, k in enumerate(dict.fromkeys(spk))}
+            seqs, constraints, sym_map = self.get_seqs_and_constraints(
+                c, o, l, spk, spk2int
+            )
             fsa = self.build_topo_sort_fsa(seqs, constraints)
             if debug:
                 sym_str = ""
@@ -200,8 +214,8 @@ class MDCTCGraphCompiler(object):
                 fsa.draw("test_fsa.svg")
             ctc_topo = self.build_ctc_topo(
                 [
-                    i + j*(self.sp.vocab_size()-1)
-                    for j, t in enumerate(c) for i in self.sp.encode(t)
+                    i + spk2int[s]*(self.sp.vocab_size()-1)
+                    for s, t in zip(spk, c) for i in self.sp.encode(t)
                 ]
             )
             ctc_topo = ctc_topo.to(self.device)

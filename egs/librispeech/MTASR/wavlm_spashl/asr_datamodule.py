@@ -260,26 +260,68 @@ class LibriSpeechAsrDataModule:
             weights.append(w)
             names.append(n)
 
+        #cs_iter = CutSpliceIterable(
+        #    cutsets,
+        #    cutset_weights=weights,
+        #    cutset_prefixes=names,
+        #    max_duration=50,
+        #    max_splices=2,
+        #    min_splices=2,
+        #    final_max_splices=2,
+        #    final_min_splices=2,
+        #    max_splices_schedule_increment=4e-05,
+        #    min_splices_schedule_increment=4e-05,
+        #    max_unique=4,
+        #    max_overlap=[1.0, 1.0, 1.0, 1.0],
+        #    min_overlap=[0.8, 0.8, 0.8, 0.8],
+        #    max_snr=[30, -30, 0, 0,],
+        #    normalize_loudness=False,
+        #    serialize='none',
+        #    sampling_rate=16000,
+        #)
         cs_iter = CutSpliceIterable(
             cutsets,
             cutset_weights=weights,
             cutset_prefixes=names,
-            max_duration=50,
-            max_splices=2,
+            max_duration=60,
+            max_splices=8,
             min_splices=2,
-            final_max_splices=2,
+            final_max_splices=8,
             final_min_splices=2,
             max_splices_schedule_increment=4e-05,
             min_splices_schedule_increment=4e-05,
             max_unique=4,
-            max_overlap=[1.0, 1.0, 1.0, 1.0],
-            min_overlap=[0.8, 0.8, 0.8, 0.8],
+            max_overlap=[0.6, 0.5, 0.2, 0.2],
+            min_overlap=[0.2, 0.05, 0.05, 0.05],
             max_snr=[30, -30, 0, 0,],
             normalize_loudness=False,
             serialize='none',
             sampling_rate=16000,
         )
         return CutSet(cs_iter)
+
+    @lru_cache()
+    def libricss_cuts(self) -> CutSet:
+        logging.info("About to get libricss cuts")
+        cuts = load_manifest_lazy("data/manifests/libricss-ihm-mix_segments_all.jsonl.gz")
+        cuts = cuts.filter(lambda c: c.id.split("_")[1].split("-")[0] != "session0")
+        return cuts
+
+    @lru_cache()
+    def single_speaker_cuts(self) -> CutSet:
+        test_other = load_manifest_lazy("./data/manifests/cuts_librispeech_test-other.jsonl.gz")
+        test_clean = load_manifest_lazy("./data/manifests/cuts_librispeech_test-clean.jsonl.gz")
+        return test_other, test_clean
+
+    @lru_cache()
+    def libri2mix_dev_clean_cuts(self) -> CutSet:
+        cuts = load_manifest_lazy("./data/manifests/libri2mix_mix_clean_sc_dev_cutset.jsonl.gz")
+        return cuts
+
+    @lru_cache()
+    def libri2mix_test_clean_cuts(self) -> CutSet:
+        cuts = load_manifest_lazy("./data/manifests/libri2mix_mix_clean_sc_test_cutset.jsonl.gz")
+        return cuts
 
     @lru_cache()
     def valid_cuts(self) -> CutSet:
@@ -301,7 +343,7 @@ class LibriSpeechAsrDataModule:
             max_duration=30,
             max_splices=2,
             min_splices=2,
-            max_overlap=[1, 1],
+            max_overlap=[0.95, 0.95],
             min_overlap=[0.8, 0.8],
             max_snr=[0, 0],
             final_max_splices=2,
