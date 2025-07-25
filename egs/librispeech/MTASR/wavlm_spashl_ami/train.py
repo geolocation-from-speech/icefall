@@ -46,6 +46,7 @@ from decoder import Decoder
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
+from lhotse import CutSet
 from model import MDCTCModel
 from optim import Eden, LRScheduler, ScaledAdam
 from torch.optim import Adam
@@ -388,8 +389,8 @@ def get_params() -> AttributeDict:
             "best_train_epoch": -1,
             "best_valid_epoch": -1,
             "batch_idx_train": 0,
-            "log_interval": 100,
-            "decode_hyp_interval": 200,
+            "log_interval": 1,
+            "decode_hyp_interval": 20,
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
@@ -406,6 +407,7 @@ def get_params() -> AttributeDict:
             "output_beam": 8,
             "min_active_states": 30,
             "max_active_states": 10000,
+            "max_avg_arcs": 100000,
         }
     )
 
@@ -617,6 +619,7 @@ def compute_loss(
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
     feature = batch["inputs"]
+    max_density = batch["max_density"]
     feature_lens = batch["num_frames"].to(device)
     # at entry, feature is (N, T, C)
     feature = feature.to(device)
@@ -710,13 +713,30 @@ def compute_loss(
 
         # Works with a BPE model
         densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
+        
+        # Determine the collar based on the 
+        collar = params.collar
         decoding_graphs = graph_compiler.compile(
             texts, start_frames, num_frames_init, speakers,
+            collar=collar
         )
+        num_arcs = decoding_graphs.labels.size(0) / len(texts)
+        logging.info(f"Num arcs: {num_arcs}")
+        logging.info(f"Max Spk density: {max_density}")
+        while num_arcs > params.max_avg_arcs:
+            collar = collar // 2 
+            logging.warning(f"Too many arcs. Halving collar: {collar}")
+            decoding_graphs = graph_compiler.compile(
+                texts, start_frames, num_frames_init, speakers,
+                collar=collar
+            )
+            num_arcs = decoding_graphs.labels.size(0)
+            logging.info(f"Num arcs: {num_arcs}")
+
         #decoding_graphs = graph_compiler.compile(texts)
 
         decoding_graphs = decoding_graphs.to(device)
-
+        
         end_sup = time.time()
 
         dense_fsa_vec = k2.DenseFsaVec(
@@ -732,15 +752,16 @@ def compute_loss(
             max_states=25000000,
             frame_idx_name=None,
         )
+        
         #lattice = k2.intersect_dense_pruned(
         #    decoding_graphs,
         #    dense_fsa_vec,
-        #    search_beam=20.0,
+        #    search_beam=15.0,
         #    output_beam=beam_size,
-        #    min_active_states=60,
-        #    max_active_states=20000, 
+        #    min_active_states=30,
+        #    max_active_states=50000, 
         #)
-        
+       
         tot_scores = lattice.get_tot_scores(
             log_semiring=True,
             use_double_scores=use_double_scores
@@ -1054,7 +1075,7 @@ def run(rank, world_size, args):
     graph_compiler = MDCTCGraphCompiler(
         params.lang_dir,
         device='cpu',
-        collar=params.collar,
+        #collar=params.collar,
     )
 
     params.vocab_size = graph_compiler.sp.vocab_size()
@@ -1165,7 +1186,7 @@ def run(rank, world_size, args):
         # an utterance duration distribution for your dataset to select
         # the threshold
         return (
-            1.0 <= c.duration <= 62.0
+            1.0 <= c.duration <= 40.0 and len(CutSet([c]).speakers) < params.max_num_spks
             #and sum(len(s.text) for s in c.supervisions) <= 400
         )
 

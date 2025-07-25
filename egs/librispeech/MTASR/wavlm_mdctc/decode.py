@@ -116,9 +116,9 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--collar",
+        "--frame-duration",
         type=int,
-        default=64000,
+        default=0.04,
     )
 
     return parser

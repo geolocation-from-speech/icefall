@@ -139,6 +139,13 @@ def get_parser():
         default=False,
     )
     
+    
+    parser.add_argument(
+        "--use-large",
+        type=str2bool,
+        default=False,
+    )
+    
     parser.add_argument(
         "--frame-duration",
         type=int,
@@ -546,10 +553,10 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
-    valid_cuts = librispeech.synth_cuts()
+    #valid_cuts = librispeech.synth_cuts()
     #test_other_cuts, test_clean_cuts = librispeech.single_speaker_cuts()
     #valid_cuts = librispeech.libricss_cuts()
-    #valid_cuts = librispeech.libri2mix_test_clean_cuts()
+    valid_cuts = librispeech.libri2mix_test_both_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
     test_sets = ["valid",]

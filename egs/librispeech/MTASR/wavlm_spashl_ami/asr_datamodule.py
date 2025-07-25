@@ -248,11 +248,11 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def train_cuts(self) -> CutSet:
         logging.info("About to get train cuts")
-        speakers = list(Path("data/manifests/librispeech_speakers").rglob("*.jsonl.gz"))
-        num_spks = len(speakers)
-        weight = 1/num_spks
+        recordings = list(Path("data/manifests/ami_recordings").rglob("*.jsonl.gz"))
+        num_recos = len(recordings)
+        weight = 1/num_recos
         cut_info = []
-        for s in speakers:
+        for s in recordings:
             cut_info.append((s.stem.split("_")[-1].split(".")[0], weight, s))
         
         cutsets, weights, names = [], [], []
@@ -261,40 +261,21 @@ class LibriSpeechAsrDataModule:
             weights.append(w)
             names.append(n)
 
-        #cs_iter = CutSpliceIterable(
-        #    cutsets,
-        #    cutset_weights=weights,
-        #    cutset_prefixes=names,
-        #    max_duration=50,
-        #    max_splices=2,
-        #    min_splices=2,
-        #    final_max_splices=2,
-        #    final_min_splices=2,
-        #    max_splices_schedule_increment=4e-05,
-        #    min_splices_schedule_increment=4e-05,
-        #    max_unique=4,
-        #    max_overlap=[1.0, 1.0, 1.0, 1.0],
-        #    min_overlap=[0.8, 0.8, 0.8, 0.8],
-        #    max_snr=[30, -30, 0, 0,],
-        #    normalize_loudness=False,
-        #    serialize='none',
-        #    sampling_rate=16000,
-        #)
         cs_iter = CutSpliceIterable(
             cutsets,
             cutset_weights=weights,
             cutset_prefixes=names,
-            max_duration=60,
-            max_splices=10,
+            max_duration=30,
+            max_splices=2,
             min_splices=2,
-            final_max_splices=10,
+            final_max_splices=2,
             final_min_splices=2,
-            max_splices_schedule_increment=4e-05,
-            min_splices_schedule_increment=4e-05,
-            max_unique=8,
-            max_overlap=[0.5]*num_spks,
-            min_overlap=[0.05]*num_spks,
-            max_snr=[60 * (random.random() - 0.5) for i in range(num_spks)],
+            max_splices_schedule_increment=4e-04,
+            min_splices_schedule_increment=4e-04,
+            max_unique=2,
+            max_overlap=[0.0]*num_recos,
+            min_overlap=[0.0]*num_recos,
+            max_snr=[60 * (random.random() - 0.5) for i in range(num_recos)],
             normalize_loudness=False,
             serialize='none',
             sampling_rate=16000,
@@ -333,10 +314,13 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
-        cut_info = [
-            ('dev-clean', 0.5, "./data/manifests/cuts_librispeech_dev-clean.jsonl.gz"),
-            ('dev-other', 0.5, "./data/manifests/cuts_librispeech_dev-other.jsonl.gz"),
-        ]
+        recordings = list(Path("data/manifests/ami_recordings_dev").rglob("*.jsonl.gz"))
+        num_recos = len(recordings)
+        weight = 1/num_recos
+        cut_info = []
+        for s in recordings:
+            cut_info.append((s.stem.split("_")[-1].split(".")[0], weight, s))
+        
         cutsets, weights, names = [], [], []
         for n, w, p in cut_info: 
             cutsets.append(load_manifest_lazy(p))
@@ -350,11 +334,14 @@ class LibriSpeechAsrDataModule:
             max_duration=30,
             max_splices=2,
             min_splices=2,
-            max_overlap=[0.95, 0.95],
-            min_overlap=[0.8, 0.8],
-            max_snr=[0, 0],
             final_max_splices=2,
+            final_min_splices=2,
+            max_splices_schedule_increment=4e-05,
+            min_splices_schedule_increment=4e-05,
             max_unique=2,
+            max_overlap=[0.0]*num_recos,
+            min_overlap=[0.0]*num_recos,
+            max_snr=[60 * (random.random() - 0.5) for i in range(num_recos)],
             normalize_loudness=False,
             serialize='none',
             sampling_rate=16000,

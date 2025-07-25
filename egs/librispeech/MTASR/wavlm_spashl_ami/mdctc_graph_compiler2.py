@@ -40,7 +40,6 @@ class MDCTCGraphCompiler(object):
         self,
         lang_dir: Path,
         device: Union[str, torch.device] = "cpu",
-        collar: int = 250
     ):
         """
             Initialize the MDCTCGraphCompiler.
@@ -62,7 +61,7 @@ class MDCTCGraphCompiler(object):
         sp = spm.SentencePieceProcessor() 
         sp.load(str(bpe_model_file))
         self.sp = sp
-        self.collar = collar
+        #self.collar = collar
 
 
     def build_ctc_topo(self, symbols: List[int]) -> k2.Fsa:
@@ -108,6 +107,7 @@ class MDCTCGraphCompiler(object):
         lens: List[int],
         spks: List[int],
         spk2int: Dict,
+        collar=64000,
     ) -> Tuple[List[List[str]], List[Tuple[str, str]], Dict[str, int]]:
         """
             Generate a list of token-level labels and precedence constraints for a sequence.
@@ -143,6 +143,8 @@ class MDCTCGraphCompiler(object):
         pos_sym_to_sym = {}
         seqs = []
         for i, (s, o, l, spk) in enumerate(zip(self.sp.encode(c), offsets, lens, spks)):
+            if len(s) == 0:
+                continue
             samples_per_token  = l // len(s) + 1
             labels = []
             for j, token in enumerate(s):
@@ -159,7 +161,7 @@ class MDCTCGraphCompiler(object):
                     continue
                 # Only consider cross sequence comparisons
                 diff = token_start_times[ki] - token_start_times[kj]
-                far_enough = abs(diff) > self.collar
+                far_enough = abs(diff) > collar
                 if far_enough:
                     num_constraints += 1
                 if far_enough and diff < 0:
@@ -175,7 +177,8 @@ class MDCTCGraphCompiler(object):
         offsets,
         lens,
         spks,
-        debug: bool = False
+        collar: int = 64000,
+        debug: bool = False,
     ) -> k2.Fsa:
         """
             Compile a batch of transcripts into CTC-constrained decoding graphs.
@@ -201,7 +204,7 @@ class MDCTCGraphCompiler(object):
         for c, o, l, spk in zip(cuts, offsets, lens, spks):
             spk2int = {k: i for i, k in enumerate(dict.fromkeys(spk))}
             seqs, constraints, sym_map = self.get_seqs_and_constraints(
-                c, o, l, spk, spk2int
+                c, o, l, spk, spk2int, collar=collar
             )
             fsa = self.build_topo_sort_fsa(seqs, constraints)
             if debug:
