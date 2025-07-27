@@ -22,10 +22,9 @@ from lhotse.dataset import (
     CutMix,
     DynamicBucketingSampler,
     PrecomputedFeatures,
-    SpecAugment,
 )
 from mdctc_graph_compiler2 import MDCTCGraphCompiler
-from dataset2 import K2MultiTalkerSpeechRecognitionDataset 
+from dataset import K2MultiTalkerSpeechRecognitionDataset 
 from lhotse.dataset.input_strategies import OnTheFlyFeatures
 from lhotse.dataset.sampling.cut_splice import CutSpliceIterable
 from lhotse.utils import fix_random_seed
@@ -33,6 +32,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from icefall.utils import str2bool
+import random
 
 
 class _SeedWorkers:
@@ -138,7 +138,7 @@ class LibriSpeechAsrDataModule:
         group.add_argument(
             "--enable-spec-aug",
             type=str2bool,
-            default=True,
+            default=False,
             help="When enabled, use SpecAugment for training dataset.",
         )
         group.add_argument(
@@ -156,11 +156,7 @@ class LibriSpeechAsrDataModule:
             default=False,
             help="Normalize the volume of each cutsplice segment",
         )
-        group.add_argument(
-            "--lang-dir",
-            type=Path,
-            default=Path("data/lang_bpe_5000")
-        )
+        
 
     def train_dataloaders(
         self,
@@ -196,9 +192,7 @@ class LibriSpeechAsrDataModule:
 
         logging.info("About to create train dataset")
         train = K2MultiTalkerSpeechRecognitionDataset(
-            graph_compiler,
             cut_transforms=[],
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
             input_transforms=input_transforms,
         )
 
@@ -234,14 +228,9 @@ class LibriSpeechAsrDataModule:
         return train_dl
 
     def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
-        graph_compiler = MDCTCGraphCompiler(
-            self.args.lang_dir,
-            device='cpu',
-        )
         validate = K2MultiTalkerSpeechRecognitionDataset(
-            graph_compiler,
+            return_cuts = self.args.return_cuts,
             cut_transforms=[],
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
         )
         
         valid_sampler = DynamicBucketingSampler(
@@ -263,7 +252,6 @@ class LibriSpeechAsrDataModule:
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
         logging.debug("About to create test dataset")
         test = K2MultiTalkerSpeechRecognitionDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
             return_cuts=self.args.return_cuts
         )
         sampler = DynamicBucketingSampler(
@@ -281,13 +269,13 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def train_cuts(self) -> CutSet:
         logging.info("About to get train cuts")
-        cut_info = [
-            ('librispeech_0', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_0.jsonl.gz"),
-            ('librispeech_1', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_1.jsonl.gz"),
-            ('librispeech_2', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_2.jsonl.gz"),
-            ('librispeech_3', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_3.jsonl.gz"),
-        ]
-
+        speakers = list(Path("data/manifests/librispeech_speakers").rglob("*.jsonl.gz"))
+        num_spks = len(speakers)
+        weight = 1/num_spks
+        cut_info = []
+        for s in speakers:
+            cut_info.append((s.stem.split("_")[-1].split(".")[0], weight, s))
+        
         cutsets, weights, names = [], [], []
         for n, w, p in cut_info: 
             cutsets.append(load_manifest_lazy(p))
@@ -298,15 +286,18 @@ class LibriSpeechAsrDataModule:
             cutsets,
             cutset_weights=weights,
             cutset_prefixes=names,
-            max_duration=30,
-            max_splices=3,
-            final_max_splices=5,
-            splices_schedule_increment=4e-05,
-            max_unique=4,
-            max_overlap=[1, 1, 1, 1],
-            min_overlap=[0.05, 0.05, 0.05, 0.05],
-            max_snr=[30, -30, 0, 0,],
-            normalize_loudness=True,
+            max_duration=60,
+            max_splices=10,
+            min_splices=2,
+            final_max_splices=10,
+            final_min_splices=2,
+            max_splices_schedule_increment=4e-05,
+            min_splices_schedule_increment=4e-05,
+            max_unique=8,
+            max_overlap=[0.5]*num_spks,
+            min_overlap=[0.05]*num_spks,
+            max_snr=[60 * (random.random() - 1) for i in range(num_spks)],
+            normalize_loudness=False,
             serialize='none',
             sampling_rate=16000,
         )
@@ -315,9 +306,10 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
+        
         cut_info = [
-            ('dev-clean', 0.5, "./data/manifests/cuts_librispeech_dev-other.jsonl.gz"),
-            ('dev-other', 0.5, "./data/manifests/cuts_librispeech_dev-clean.jsonl.gz"),
+            ('dev-clean', 0.5, "./data/manifests/cuts_librispeech_dev-clean.jsonl.gz"),
+            ('dev-other', 0.5, "./data/manifests/cuts_librispeech_dev-other.jsonl.gz"),
         ]
         cutsets, weights, names = [], [], []
         for n, w, p in cut_info: 
@@ -330,13 +322,15 @@ class LibriSpeechAsrDataModule:
             cutset_weights=weights,
             cutset_prefixes=names,
             max_duration=30,
-            max_splices=4,
-            max_overlap=[1, 1],
-            min_overlap=[0.5, 0.5],
-            max_snr=[30, -30],
-            final_max_splices=4,
+            max_splices=2,
+            min_splices=2,
+            max_overlap=[0.95, 0.95],
+            min_overlap=[0.8, 0.8],
+            max_snr=[0, 0],
+            final_min_splices=2,
+            final_max_splices=2,
             max_unique=2,
-            normalize_loudness=True,
+            normalize_loudness=False,
             serialize='none',
             sampling_rate=16000,
         )

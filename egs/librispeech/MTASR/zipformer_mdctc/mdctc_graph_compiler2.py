@@ -140,6 +140,8 @@ class MDCTCGraphCompiler(object):
         pos_sym_to_sym = {}
         seqs = []
         for i, (s, o, l) in enumerate(zip(self.sp.encode(c), offsets, lens)):
+            if len(s) == 0:
+                continue
             samples_per_token  = l // len(s) + 1
             labels = []
             for j, token in enumerate(s):
