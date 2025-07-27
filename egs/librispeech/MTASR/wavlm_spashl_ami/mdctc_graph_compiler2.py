@@ -85,12 +85,12 @@ class MDCTCGraphCompiler(object):
             arcs.append(f"{blank_state} {i} {s1} {s1} 0.0")    # to symbol state
         
             # only self-loop and go to blank
-            arcs.append(f"{i} {i} {s1} 0 0.0")     # self-loop with symbol
+            #arcs.append(f"{i} {i} {s1} 0 0.0")     # self-loop with symbol
             arcs.append(f"{i} 0 0 0 0.0")  # to blank
-            for j, s2 in enumerate(symbols, 1):
-                if i == j:
-                    continue
-                arcs.append(f"{i} {j} {s2} {s2} 0.0")
+            #for j, s2 in enumerate(symbols, 1):
+            #    if i == j:
+            #        continue
+            #    arcs.append(f"{i} {j} {s2} {s2} 0.0")
             arcs.append(f"{i} {len(symbols)+1} -1 -1 0.0")
         arcs = sorted(arcs, key=lambda x: int(x.split()[0]))
         arcs.append(f"{len(symbols)+1}")

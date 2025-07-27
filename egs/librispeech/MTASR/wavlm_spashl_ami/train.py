@@ -399,7 +399,7 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             # parameters for loss
-            "beam_size": 24,
+            "beam_size": 8,
             "reduction": "sum",
             "use_double_scores": True,
             # parameters for decoding
@@ -723,17 +723,16 @@ def compute_loss(
         num_arcs = decoding_graphs.labels.size(0) / len(texts)
         logging.info(f"Num arcs: {num_arcs}")
         logging.info(f"Max Spk density: {max_density}")
-        while num_arcs > params.max_avg_arcs:
-            collar = collar // 2 
-            logging.warning(f"Too many arcs. Halving collar: {collar}")
-            decoding_graphs = graph_compiler.compile(
-                texts, start_frames, num_frames_init, speakers,
-                collar=collar
-            )
-            num_arcs = decoding_graphs.labels.size(0)
-            logging.info(f"Num arcs: {num_arcs}")
-
-        #decoding_graphs = graph_compiler.compile(texts)
+        logging.info(f"Length: {feature_lens[0].item()}")
+        #while num_arcs > params.max_avg_arcs:
+        #    collar = collar // 2 
+        #    logging.warning(f"Too many arcs. Halving collar: {collar}")
+        #    decoding_graphs = graph_compiler.compile(
+        #        texts, start_frames, num_frames_init, speakers,
+        #        collar=collar
+        #    )
+        #    num_arcs = decoding_graphs.labels.size(0)
+        #    logging.info(f"Num arcs: {num_arcs}")
 
         decoding_graphs = decoding_graphs.to(device)
         

@@ -178,6 +178,7 @@ class MDCTCModel(nn.Module):
         self,
         x: torch.Tensor,
         x_lens: torch.Tensor,
+        speaker_mask = None,
     ) -> torch.Tensor:
         """
         Args:
