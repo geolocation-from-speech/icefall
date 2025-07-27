@@ -152,6 +152,12 @@ def get_parser():
         default=0.04,
     )
 
+    parser.add_argument(
+        "--masked-spks",
+        type=str,
+        default=None
+    )
+
     return parser
 
 
@@ -287,6 +293,7 @@ def decode_one_batch(
     feature = feature.to(device)
     texts = [[t.strip() for t in b] for b in batch["texts"]]
     speakers = batch["speakers"]
+    speaker_mask = None if params.masked_spks is None else [int(s) for s in params.masked_spks.split()]
     seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
         batch['supervisions']['start_sample'][seq_idx == i].tolist()
@@ -302,6 +309,7 @@ def decode_one_batch(
         ctc_output, x_lens = model(
             feature,
             feature_lens,
+            speaker_mask = speaker_mask
         )
         end_nnet = time.time()
         subsampling_factor = params.subsampling_factor
@@ -556,7 +564,7 @@ def main():
     #valid_cuts = librispeech.synth_cuts()
     #test_other_cuts, test_clean_cuts = librispeech.single_speaker_cuts()
     #valid_cuts = librispeech.libricss_cuts()
-    valid_cuts = librispeech.libri2mix_test_both_cuts()
+    valid_cuts = librispeech.libri2mix_test_clean_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
     test_sets = ["valid",]

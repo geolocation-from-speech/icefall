@@ -325,6 +325,11 @@ class LibriSpeechAsrDataModule:
         return cuts
 
     @lru_cache()
+    def libri3mix_test_clean_cuts(self) -> CutSet:
+        cuts = load_manifest_lazy("./data/manifests/libri3mix_mix_clean_sc_test_cutset.jsonl.gz")
+        return cuts
+
+    @lru_cache()
     def libri2mix_test_both_cuts(self) -> CutSet:
         cuts = load_manifest_lazy("./data/manifests/libri2mix_mix_both_sc_test_cutset.jsonl.gz")
         return cuts

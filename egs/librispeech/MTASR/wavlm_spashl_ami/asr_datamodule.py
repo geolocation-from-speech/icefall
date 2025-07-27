@@ -367,7 +367,17 @@ class LibriSpeechAsrDataModule:
         logging.info("About to get audioset cuts")
         return load_manifest_lazy("data/manifests/audioset_eval_whole/cuts_0_mapped.jsonl.gz").subset(first=100) 
 
+    @lru_cache()
+    def ami_dev(self) -> CutSet:
+        logging.info("About to get ami dev cuts")
+        return load_manifest_lazy("data/manifests/cuts_ami_dev_pause0.5.jsonl.gz")
    
+    @lru_cache()
+    def ami_test(self) -> CutSet:
+        logging.info("About to get ami test cuts")
+        return load_manifest_lazy("data/manifests/cuts_ami_test_pause0.5.jsonl.gz")
+
+
 def test():
     parser = argparse.ArgumentParser()
     Scale23SpeechAsrDataModule.add_arguments(parser)

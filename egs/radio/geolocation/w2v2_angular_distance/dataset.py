@@ -85,6 +85,7 @@ class GeolocationDataset(torch.utils.data.Dataset):
                     new_cuts.extend([c for c in c_windows]) 
             cuts = CutSet.from_cuts(new_cuts)
         inputs, input_lens = collate_audio(cuts)
+        inputs = inputs.to(torch.float32)
         # Get a tensor with batched feature matrices, shape (B, T, F)
         # Collation performs auto-padding, if necessary.
         supervision_intervals = self.input_strategy.supervision_intervals(cuts)

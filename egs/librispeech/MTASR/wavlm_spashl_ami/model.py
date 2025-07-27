@@ -229,12 +229,16 @@ class MDCTCModel(nn.Module):
             out1 = self.log_softmax(ctc_output1)
             blank = out1[..., 0]
             out2 = self.log_softmax(ctc_output2)
+            if speaker_mask is not None:
+                out2[..., speaker_mask] = -torch.inf
             out = out1[..., 1:].unsqueeze(-1) + out2.unsqueeze(-2)
+            out = out.permute(0, 1, 3, 2)
             out = out.reshape(out.size(0), out.size(1), -1)
             out = torch.cat([blank.unsqueeze(-1), out], dim=-1)
         else:
             blank = ctc_output1[..., 0]
             out = ctc_output1[..., 1:].unsqueeze(-1) + ctc_output2.unsqueeze(-2)
+            out = out.permute(0, 1, 3, 2)
             out = out.reshape(out.size(0), out.size(1), -1)
             out = torch.cat([blank.unsqueeze(-1), out], dim=-1)
             out = self.log_softmax(out)
