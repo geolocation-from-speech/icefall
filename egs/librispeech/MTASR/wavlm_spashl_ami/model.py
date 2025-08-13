@@ -229,6 +229,8 @@ class MDCTCModel(nn.Module):
         if self.hat:
             out1 = self.log_softmax(ctc_output1)
             blank = out1[..., 0]
+            #if speaker_mask is not None:
+            #    ctc_output2[..., speaker_mask] = -torch.inf
             out2 = self.log_softmax(ctc_output2)
             if speaker_mask is not None:
                 out2[..., speaker_mask] = -torch.inf

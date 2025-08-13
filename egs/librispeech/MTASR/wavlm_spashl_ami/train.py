@@ -399,12 +399,12 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             # parameters for loss
-            "beam_size": 8,
+            "beam_size": 24,
             "reduction": "sum",
             "use_double_scores": True,
             # parameters for decoding
             "search_beam": 20,
-            "output_beam": 8,
+            "output_beam": 24,
             "min_active_states": 30,
             "max_active_states": 10000,
             "max_avg_arcs": 100000,
@@ -640,6 +640,7 @@ def compute_loss(
     with torch.set_grad_enabled(is_training):
         start = time.time()
         ctc_output, x_lens = model(feature, feature_lens)
+        ctc_output -= 1e-09
         end_nnet = time.time()
         subsampling_factor = params.subsampling_factor
         beam_size = params.beam_size * beam_factor
@@ -714,11 +715,10 @@ def compute_loss(
         # Works with a BPE model
         densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
         
-        # Determine the collar based on the 
         collar = params.collar
         decoding_graphs = graph_compiler.compile(
             texts, start_frames, num_frames_init, speakers,
-            collar=collar
+            collar=collar, dynamic_collar=True, max_overlaps=4000,
         )
         num_arcs = decoding_graphs.labels.size(0) / len(texts)
         logging.info(f"Num arcs: {num_arcs}")
@@ -751,7 +751,12 @@ def compute_loss(
             max_states=25000000,
             frame_idx_name=None,
         )
-        
+       
+        #import pdb; pdb.set_trace() 
+        #empty_idxs = []
+        #for i in range(lattice.shape[0]):
+        #    if lattice[i].labels.size(0) == 0:
+        #        empty_idxs.append(i)
         #lattice = k2.intersect_dense_pruned(
         #    decoding_graphs,
         #    dense_fsa_vec,
@@ -766,6 +771,10 @@ def compute_loss(
             use_double_scores=use_double_scores
         )
         loss = -1 * tot_scores
+        loss = loss[~torch.isinf(loss)]
+        if torch.any(loss < 0):
+            logging.info("Negative loss. Clamping") 
+            loss = torch.clamp(loss, min=0.0)
         loss = loss.to(torch.float32) 
         ctc_loss = loss.sum() 
         #ctc_loss = k2.ctc_loss(
@@ -787,6 +796,7 @@ def compute_loss(
     info["ctc_loss"] = ctc_loss.detach().cpu().item()
     info["beam_size"] = beam_size * tot_frames 
     info["max_length"] = num_frames.max() * tot_frames
+    info["max_duration"] = num_frames.max() * 0.01 * params.subsampling_factor * tot_frames
     avg_num_texts = sum([len(t) for t in texts])/len(texts)
     info["num_texts"] = avg_num_texts * tot_frames
     info["spk_density"] = (sum(densities) / len(densities)) * tot_frames
@@ -1010,24 +1020,24 @@ def train_one_epoch(
                         params.batch_idx_train,
                     )
 
-        if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
-            logging.info("Computing validation loss")
-            valid_info = compute_validation_loss(
-                params=params,
-                model=model,
-                graph_compiler=graph_compiler,
-                valid_dl=valid_dl,
-                world_size=world_size,
-            )
-            model.train()
-            logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
-            logging.info(
-                f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-            )
-            if tb_writer is not None:
-                valid_info.write_summary(
-                    tb_writer, "train/valid_", params.batch_idx_train
-                )
+        #if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
+        #    logging.info("Computing validation loss")
+        #    valid_info = compute_validation_loss(
+        #        params=params,
+        #        model=model,
+        #        graph_compiler=graph_compiler,
+        #        valid_dl=valid_dl,
+        #        world_size=world_size,
+        #    )
+        #    model.train()
+        #    logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
+        #    logging.info(
+        #        f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+        #    )
+        #    if tb_writer is not None:
+        #        valid_info.write_summary(
+        #            tb_writer, "train/valid_", params.batch_idx_train
+        #        )
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
@@ -1185,7 +1195,7 @@ def run(rank, world_size, args):
         # an utterance duration distribution for your dataset to select
         # the threshold
         return (
-            1.0 <= c.duration <= 40.0 and len(CutSet([c]).speakers) < params.max_num_spks
+            1.0 <= c.duration <= 62.0 and len(CutSet([c]).speakers) < params.max_num_spks
             #and sum(len(s.text) for s in c.supervisions) <= 400
         )
 

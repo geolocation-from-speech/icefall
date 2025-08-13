@@ -29,6 +29,7 @@ from lhotse.dataset.sampling.cut_splice import CutSpliceIterable
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import random
 
 from icefall.utils import str2bool
 
@@ -247,18 +248,43 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def train_cuts(self) -> CutSet:
         logging.info("About to get train cuts")
-        cut_info = [
-            ('librispeech_0', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_0.jsonl.gz"),
-            ('librispeech_1', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_1.jsonl.gz"),
-            ('librispeech_2', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_2.jsonl.gz"),
-            ('librispeech_3', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_3.jsonl.gz"),
-        ]
+        #cut_info = [
+        #    ('librispeech_0', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_0.jsonl.gz"),
+        #    ('librispeech_1', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_1.jsonl.gz"),
+        #    ('librispeech_2', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_2.jsonl.gz"),
+        #    ('librispeech_3', 0.25, "./data/manifests/cuts_librispeech_train_shuffled_3.jsonl.gz"),
+        #]
 
-        cutsets, weights, names = [], [], []
+        path = "/ocean/projects/cis210027p/scornell/mdctc/icefall/egs/librispeech/MTASR/manifests"
+        recordings = list(Path(path).rglob("*train.jsonl.gz"))
+        recordings += path + "/swbd-ihm_cutset_all.jsonl.gz"
+        speakers = list(Path("data/manifests/librispeech_speakers").rglob("*.jsonl.gz"))
+        num_recos = len(recordings) + len(speakers)
+        reco_weight = (1/len(recordings)) * 0.7
+        lspeech_weight = 1 / len(speakers) * 0.3
+        cut_info = []
+        for s in recordings:
+            cut_info.append((s.stem, reco_weight, s))
+
+
+        cutsets, weights, names, min_overlap, max_overlap = [], [], [], [], []
         for n, w, p in cut_info: 
             cutsets.append(load_manifest_lazy(p))
             weights.append(w)
             names.append(n)
+            min_overlap.append(0)
+            max_overlap.append(0)
+
+        cut_info2 = []
+        for s in speakers:
+            cut_info2.append((s.stem.split("_")[-1].split(".")[0], lspeech_weight, s))
+
+        for n, w, p in cut_info2: 
+            cutsets.append(load_manifest_lazy(p))
+            weights.append(w)
+            names.append(n)
+            min_overlap.append(0.5)
+            max_overlap.append(0.95)
 
         cs_iter = CutSpliceIterable(
             cutsets,
@@ -271,10 +297,10 @@ class LibriSpeechAsrDataModule:
             final_min_splices=2,
             max_splices_schedule_increment=4e-05,
             min_splices_schedule_increment=4e-05,
-            max_unique=4,
-            max_overlap=[1, 1, 1, 1],
-            min_overlap=[0.8, 0.8, 0.8, 0.8],
-            max_snr=[30, -30, 0, 0,],
+            max_unique=2,
+            max_overlap=max_overlap,
+            min_overlap=min_overlap,
+            max_snr=[60 * (random.random() - 0.5) for i in range(num_recos)],
             normalize_loudness=False,
             serialize='none',
             sampling_rate=16000,
@@ -285,8 +311,8 @@ class LibriSpeechAsrDataModule:
     def valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
         cut_info = [
-            ('test-clean', 0.5, "./data/manifests/cuts_librispeech_test-clean.jsonl.gz"),
-            ('test-clean', 0.5, "./data/manifests/cuts_librispeech_test-clean.jsonl.gz"),
+            ('dev-clean', 0.5, "./data/manifests/cuts_librispeech_dev-clean.jsonl.gz"),
+            ('dev-other', 0.5, "./data/manifests/cuts_librispeech_dev-other.jsonl.gz"),
         ]
         cutsets, weights, names = [], [], []
         for n, w, p in cut_info: 
@@ -306,7 +332,7 @@ class LibriSpeechAsrDataModule:
             max_snr=[0, 0],
             final_max_splices=2,
             max_unique=2,
-            normalize_loudness=True,
+            normalize_loudness=False,
             serialize='none',
             sampling_rate=16000,
         )

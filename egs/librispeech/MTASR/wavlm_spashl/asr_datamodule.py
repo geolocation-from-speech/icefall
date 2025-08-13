@@ -334,7 +334,11 @@ class LibriSpeechAsrDataModule:
         cuts = load_manifest_lazy("./data/manifests/libri2mix_mix_both_sc_test_cutset.jsonl.gz")
         return cuts
 
-    
+    @lru_cache()
+    def ami_dev(self) -> CutSet:
+        logging.info("About to get ami dev cuts")
+        return load_manifest_lazy("data/manifests/cuts_ami_dev_pause0.5.jsonl.gz")
+
     @lru_cache()
     def valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")

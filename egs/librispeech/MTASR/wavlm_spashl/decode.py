@@ -564,7 +564,8 @@ def main():
     #valid_cuts = librispeech.synth_cuts()
     #test_other_cuts, test_clean_cuts = librispeech.single_speaker_cuts()
     #valid_cuts = librispeech.libricss_cuts()
-    valid_cuts = librispeech.libri2mix_test_clean_cuts()
+    #valid_cuts = librispeech.libri3mix_test_clean_cuts()
+    valid_cuts = librispeech.ami_dev()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
     test_sets = ["valid",]

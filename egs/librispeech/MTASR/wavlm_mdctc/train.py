@@ -389,7 +389,10 @@ def get_params() -> AttributeDict:
 
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
-    bundle = torchaudio.pipelines.WAVLM_BASE_PLUS
+    if params.use_large:
+        bundle = torchaudio.pipelines.WAVLM_LARGE
+    else:
+        bundle = torchaudio.pipelines.WAVLM_BASE_PLUS
     model = bundle.get_model()
     x = torch.rand(1, 400)
     odim = model(x)[0].size(-1)
@@ -592,6 +595,7 @@ def compute_loss(
     feature = feature.to(device)
     feature_lens = feature_lens.to(device)
     texts = batch["texts"]
+    speakers = batch["speakers"]
     seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
         batch['supervisions']['start_sample'][seq_idx == i].tolist()
@@ -615,14 +619,44 @@ def compute_loss(
 
         if params.batch_idx_train % params.decode_hyp_interval == 0:
             preds = ctc_output.argmax(-1)
-            hyps = [
-                preds[i].unique_consecutive()[preds[i].unique_consecutive() != 0].squeeze(0).tolist()
-                for i in range(preds.size(0))
-            ]
-            
-            logging.info(f" ------------------------------------- " )
-            logging.info(f"hyp: {graph_compiler.sp.decode(hyps[0])}")
-            logging.info(f"")
+            hyps = []
+            spk_hyps = []
+            for i in range(preds.size(0)):
+                hyps_ = {}
+                preds_no_repeats = preds[i].unique_consecutive()
+                preds_no_repeats_or_blanks = preds_no_repeats[preds_no_repeats != 0].squeeze()
+                spks = preds_no_repeats_or_blanks // (params.vocab_size - 1)
+                units = preds_no_repeats_or_blanks.remainder((params.vocab_size - 1))
+                for s in range(1):
+                    s_units = units[spks == s].tolist()
+                    hyps_[s] = s_units
+                hyps.append(hyps_)
+                spk_hyps.append(spks.view(-1).tolist())
+
+            # Construct the speaker ref
+            text_lens = []
+            num_frames_ref, num_tokens_ref = 0, 0
+            for t_idx in range(len(texts[0])): 
+                text_lens.append(start_frames[0][t_idx] + num_frames_init[0][t_idx])
+                num_frames_ref += num_frames_init[0][t_idx]
+                num_tokens_ref += len(graph_compiler.sp.encode(texts[0][t_idx]))
+            max_len = max(text_lens)
+            frames_per_token = num_frames_ref // num_tokens_ref + 1
+            start_tokens = [start_frames[0][t_idx] // frames_per_token for t_idx in range(len(texts[0]))]
+            spk2int = {k: i for i, k in enumerate(dict.fromkeys(speakers[0]))}
+
+            logging.info(f" ===================================== " )
+            logging.info(f"spk_ref: ")
+            for t_idx, st in enumerate(start_tokens):
+                blanks = " "*st
+                tokens = str(spk2int[speakers[0][t_idx]])*len(graph_compiler.sp.encode(texts[0][t_idx]))
+                logging.info(f"{blanks}{tokens}")
+            logging.info(f" ---------------")
+            logging.info(f"spk_hyp: {"".join(map(str, spk_hyps[0]))}")
+            for t_idx in range(len(hyps[0])):
+                logging.info(f"hyp_{t_idx}: {graph_compiler.sp.decode(hyps[0][t_idx])}")
+                logging.info(f"")
+            logging.info(f" --------")
             for t_idx, text in enumerate(texts[0]):
                 logging.info(f"ref_{t_idx}: {text}")
                 logging.info(f"")
@@ -649,11 +683,29 @@ def compute_loss(
 
         # Works with a BPE model
         densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
-        decoding_graphs = graph_compiler.compile(texts, start_frames, num_frames_init)
-        #decoding_graphs = graph_compiler.compile(texts)
+        
+        # Determine the collar based on the 
+        collar = params.collar
+        decoding_graphs = graph_compiler.compile(
+            texts, start_frames, num_frames_init, speakers,
+            collar=collar
+        )
+        num_arcs = decoding_graphs.labels.size(0) / len(texts)
+        logging.info(f"Num arcs: {num_arcs}")
+        logging.info(f"Max Spk density: {max_density}")
+        logging.info(f"Length: {feature_lens[0].item()}")
+        #while num_arcs > params.max_avg_arcs:
+        #    collar = collar // 2 
+        #    logging.warning(f"Too many arcs. Halving collar: {collar}")
+        #    decoding_graphs = graph_compiler.compile(
+        #        texts, start_frames, num_frames_init, speakers,
+        #        collar=collar
+        #    )
+        #    num_arcs = decoding_graphs.labels.size(0)
+        #    logging.info(f"Num arcs: {num_arcs}")
 
         decoding_graphs = decoding_graphs.to(device)
-
+        
         end_sup = time.time()
 
         dense_fsa_vec = k2.DenseFsaVec(
@@ -669,15 +721,16 @@ def compute_loss(
             max_states=25000000,
             frame_idx_name=None,
         )
+        
         #lattice = k2.intersect_dense_pruned(
         #    decoding_graphs,
         #    dense_fsa_vec,
-        #    search_beam=20.0,
+        #    search_beam=15.0,
         #    output_beam=beam_size,
-        #    min_active_states=60,
-        #    max_active_states=20000, 
+        #    min_active_states=30,
+        #    max_active_states=50000, 
         #)
-        
+       
         tot_scores = lattice.get_tot_scores(
             log_semiring=True,
             use_double_scores=use_double_scores

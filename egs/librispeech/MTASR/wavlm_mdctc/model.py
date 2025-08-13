@@ -134,10 +134,13 @@ class MDCTCModel(nn.Module):
         """
         super().__init__()
         # Freeze the feature extractor (CNN frontend)
-        for param in encoder.feature_extractor.parameters():
-            param.requires_grad = False
-        
-        # This assertion is to make sure that we upsample by a whole integer
+        try:
+            for param in encoder.feature_extractor.parameters():
+                param.requires_grad = False
+        except AttributeError:
+            for param in encoder.model.feature_extractor.parameters():
+                param.requires_grad = False
+ 
         # value
         # Adding in transposed convolution
         #self.upsampler = nn.ConvTranspose1d(
@@ -212,17 +215,33 @@ class MDCTCModel(nn.Module):
         return ctc_output, x_lens
 
     def freeze_encoder(self):
-        for p in self.encoder.encoder.parameters():
-            if p.requires_grad:
-                p.requires_grad = False
-        self.frozen = True
+        try:
+            for p in self.encoder.encoder.parameters():
+                if p.requires_grad:
+                    p.requires_grad = False
+            self.frozen = True
+        except AttributeError:
+            for p in self.encoder.model.parameters():
+                if p.requires_grad:
+                    p.requires_grad = False
+            self.frozen = True
+
 
     def unfreeze_encoder(self):
-        for i, p in enumerate(self.encoder.encoder.parameters()):
-            p.requires_grad = True
-        if self.freeze_feat_extractor:
-            # Freeze the feature extractor (CNN frontend)
-            for param in self.encoder.feature_extractor.parameters():
-                param.requires_grad = False
-        self.frozen = False
+        try:
+            for i, p in enumerate(self.encoder.encoder.parameters()):
+                p.requires_grad = True
+            if self.freeze_feat_extractor:
+                # Freeze the feature extractor (CNN frontend)
+                for param in self.encoder.feature_extractor.parameters():
+                    param.requires_grad = False
+            self.frozen = False
+        except AttributeError:
+            for i, p in enumerate(self.encoder.model.parameters()):
+                p.requires_grad = True
+            if self.freeze_feat_extractor:
+                # Freeze the feature extractor (CNN frontend)
+                for param in self.encoder.model.feature_extractor.parameters():
+                    param.requires_grad = False
+            self.frozen = False
 

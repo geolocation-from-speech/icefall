@@ -173,6 +173,12 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
 
         # Sort the cuts again after transforms
         cuts = cuts.sort_by_duration(ascending=False)
+        if self.is_training:
+            # in training select random channel from mdm
+            cuts = CutSet.from_cuts([random_mono_cut(x, None) for x in cuts])
+        else:
+            cuts = CutSet.from_cuts([random_mono_cut(x, 0) for x in cuts])
+
         inputs, input_lens = collate_audio(cuts)
         inputs = inputs.to(torch.float32)
         # Get a dict of tensors that encode the positional information about supervisions
@@ -182,7 +188,6 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         
         # Get the number of frames per audio_cut
         seq_idx = supervision_intervals['sequence_idx']
-        num_frames = []
         #for c in cuts:
         #    nf = compute_num_frames(
         #        c.duration, frame_shift=fs, sampling_rate=c.sampling_rate
@@ -192,11 +197,20 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         
         # Apply all available transforms on the inputs, i.e. either audio or features.
         # This could be feature extraction, global MVN, SpecAugment, etc.
+        max_density = max([sum([len(w.supervisions) for w in c.cut_into_windows(0.5)])/len(c.cut_into_windows(0.5)) for c in cuts])
         segments = torch.stack(list(supervision_intervals.values()), dim=1)
         for tnfm in self.input_transforms:
             inputs = tnfm(inputs, supervision_segments=segments)
 
-        texts = extract_texts_from(cuts)
+        texts = [
+            [s.text for s in sorted(c.supervisions, key=lambda x: x.start)]
+            for c in cuts
+        ]
+
+        speakers = [
+            [s.speaker if s.speaker is not None else "noise" for s in sorted(c.supervisions, key=lambda x: x.start)]
+            for c in cuts
+        ]
 
         batch = {
             "inputs": inputs,
@@ -210,7 +224,9 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
                 ]
             ),
             "texts": texts,
+            "speakers": speakers,
             "num_frames": input_lens,
+            "max_density": max_density,
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)
@@ -224,46 +240,46 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
             for c in cuts
             for s in c.supervisions
         )
-        if has_word_alignments:
-            # TODO: might need to refactor BatchIO API to move the following conditional logic
-            #       into these objects (e.g. use like: self.input_strategy.convert_timestamp(),
-            #       that returns either num_frames or num_samples depending on the strategy).
-            words, starts, ends = [], [], []
-            frame_shift = cuts[0].frame_shift
-            sampling_rate = cuts[0].sampling_rate
-            if frame_shift is None:
-                try:
-                    frame_shift = self.input_strategy.extractor.frame_shift
-                except AttributeError:
-                    raise ValueError(
-                        "Can't determine the frame_shift -- it is not present either in cuts or the input_strategy. "
-                    )
-            for c in cuts:
-                for s in c.supervisions:
-                    words.append([aliword.symbol for aliword in s.alignment["word"]])
-                    starts.append(
-                        [
-                            compute_num_frames(
-                                aliword.start,
-                                frame_shift=frame_shift,
-                                sampling_rate=sampling_rate,
-                            )
-                            for aliword in s.alignment["word"]
-                        ]
-                    )
-                    ends.append(
-                        [
-                            compute_num_frames(
-                                aliword.end,
-                                frame_shift=frame_shift,
-                                sampling_rate=sampling_rate,
-                            )
-                            for aliword in s.alignment["word"]
-                        ]
-                    )
-            batch["supervisions"]["word"] = words
-            batch["supervisions"]["word_start"] = starts
-            batch["supervisions"]["word_end"] = ends
+        #if has_word_alignments:
+        #    # TODO: might need to refactor BatchIO API to move the following conditional logic
+        #    #       into these objects (e.g. use like: self.input_strategy.convert_timestamp(),
+        #    #       that returns either num_frames or num_samples depending on the strategy).
+        #    words, starts, ends = [], [], []
+        #    frame_shift = cuts[0].frame_shift
+        #    sampling_rate = cuts[0].sampling_rate
+        #    if frame_shift is None:
+        #        try:
+        #            frame_shift = self.input_strategy.extractor.frame_shift
+        #        except AttributeError:
+        #            raise ValueError(
+        #                "Can't determine the frame_shift -- it is not present either in cuts or the input_strategy. "
+        #            )
+        #    for c in cuts:
+        #        for s in c.supervisions:
+        #            words.append([aliword.symbol for aliword in s.alignment["word"]])
+        #            starts.append(
+        #                [
+        #                    compute_num_frames(
+        #                        aliword.start,
+        #                        frame_shift=frame_shift,
+        #                        sampling_rate=sampling_rate,
+        #                    )
+        #                    for aliword in s.alignment["word"]
+        #                ]
+        #            )
+        #            ends.append(
+        #                [
+        #                    compute_num_frames(
+        #                        aliword.end,
+        #                        frame_shift=frame_shift,
+        #                        sampling_rate=sampling_rate,
+        #                    )
+        #                    for aliword in s.alignment["word"]
+        #                ]
+        #            )
+        #    batch["supervisions"]["word"] = words
+        #    batch["supervisions"]["word_start"] = starts
+        #    batch["supervisions"]["word_end"] = ends
 
         return batch
 
@@ -300,3 +316,19 @@ def extract_texts_from(cuts):
             cut_texts.append(text_)
         texts.append(cut_texts)
     return texts
+
+
+def random_mono_cut(cut, fix_channel=None):
+    if isinstance(cut, MonoCut):
+        return cut
+    elif isinstance(cut, MultiCut):
+        if fix_channel is None:
+            channel = random.choice(cut.channel)
+        else:
+            channel = fix_channel
+
+        return cut.to_mono()[channel]
+    else:
+        raise ValueError(f"Unexpected cut type: {type(cut)}")
+
+

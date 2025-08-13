@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Union, Optional, List, Tuple, Dict
 import torch
 from collections import defaultdict, deque
+from itertools import groupby
 
 
 # For now, this only works on CPU as far as I can tell
@@ -39,7 +40,6 @@ class MDCTCGraphCompiler(object):
         self,
         lang_dir: Path,
         device: Union[str, torch.device] = "cpu",
-        collar: int = 250
     ):
         """
             Initialize the MDCTCGraphCompiler.
@@ -61,7 +61,6 @@ class MDCTCGraphCompiler(object):
         sp = spm.SentencePieceProcessor() 
         sp.load(str(bpe_model_file))
         self.sp = sp
-        self.collar = collar
 
 
     def build_ctc_topo(self, symbols: List[int]) -> k2.Fsa:
@@ -85,12 +84,12 @@ class MDCTCGraphCompiler(object):
             arcs.append(f"{blank_state} {i} {s1} {s1} 0.0")    # to symbol state
         
             # only self-loop and go to blank
-            arcs.append(f"{i} {i} {s1} 0 0.0")     # self-loop with symbol
+            #arcs.append(f"{i} {i} {s1} 0 0.0")     # self-loop with symbol
             arcs.append(f"{i} 0 0 0 0.0")  # to blank
-            for j, s2 in enumerate(symbols, 1):
-                if i == j:
-                    continue
-                arcs.append(f"{i} {j} {s2} {s2} 0.0")
+            #for j, s2 in enumerate(symbols, 1):
+            #    if i == j:
+            #        continue
+            #    arcs.append(f"{i} {j} {s2} {s2} 0.0")
             arcs.append(f"{i} {len(symbols)+1} -1 -1 0.0")
         arcs = sorted(arcs, key=lambda x: int(x.split()[0]))
         arcs.append(f"{len(symbols)+1}")
@@ -105,6 +104,9 @@ class MDCTCGraphCompiler(object):
         c: List[str],
         offsets: List[int],
         lens: List[int],
+        spks: List[int],
+        spk2int: Dict,
+        collar=64000,
     ) -> Tuple[List[List[str]], List[Tuple[str, str]], Dict[str, int]]:
         """
             Generate a list of token-level labels and precedence constraints for a sequence.
@@ -139,13 +141,13 @@ class MDCTCGraphCompiler(object):
         token_start_times = {}
         pos_sym_to_sym = {}
         seqs = []
-        for i, (s, o, l) in enumerate(zip(self.sp.encode(c), offsets, lens)):
+        for i, (s, o, l, spk) in enumerate(zip(self.sp.encode(c), offsets, lens, spks)):
             if len(s) == 0:
                 continue
             samples_per_token  = l // len(s) + 1
             labels = []
             for j, token in enumerate(s):
-                pos_sym = str(token) + f"_{i}_{j}"
+                pos_sym = (token, spk2int[spk], j, i)
                 pos_sym_to_sym[pos_sym] = token
                 token_start_times[pos_sym] = o + j*samples_per_token
                 labels.append(pos_sym)
@@ -154,11 +156,11 @@ class MDCTCGraphCompiler(object):
         num_constraints = 0 
         for ki in token_start_times:
             for kj in token_start_times:
-                if ki.split("_")[1] == kj.split("_")[1]:
+                if ki[3] == kj[3]:
                     continue
                 # Only consider cross sequence comparisons
                 diff = token_start_times[ki] - token_start_times[kj]
-                far_enough = abs(diff) > self.collar
+                far_enough = abs(diff) > collar
                 if far_enough:
                     num_constraints += 1
                 if far_enough and diff < 0:
@@ -168,7 +170,15 @@ class MDCTCGraphCompiler(object):
         #print(f"num_constraints: {num_constraints}")
         return seqs, constraints, pos_sym_to_sym
 
-    def compile(self, cuts: List[List[str]], offsets, lens, debug: bool = False) -> k2.Fsa:
+    def compile(
+        self,
+        cuts: List[List[str]],
+        offsets,
+        lens,
+        spks,
+        collar: int = 64000,
+        debug: bool = False,
+    ) -> k2.Fsa:
         """
             Compile a batch of transcripts into CTC-constrained decoding graphs.
 
@@ -183,15 +193,19 @@ class MDCTCGraphCompiler(object):
             :type offsets: List[List[int]] or compatible structure
             :param lens: A batch of lengths (e.g., in frames or tokens) for each token in each transcript.
             :type lens: List[List[int]] or compatible structure
+            :param spks: A batch of lists of speaker labels
             :param debug: Flag for debugging outputs
             :type debug: bool
             :return: A batched FSA (`FsaVec`) representing all input transcripts composed with a CTC topology.
             :rtype: k2.Fsa
-        """ 
+        """
         graphs = []
-        for c, o, l in zip(cuts, offsets, lens):
-            seqs, constraints, sym_map = self.get_seqs_and_constraints(c, o, l)
-            fsa = self.build_topo_sort_fsa(seqs, constraints, sym_map)
+        for c, o, l, spk in zip(cuts, offsets, lens, spks):
+            spk2int = {k: i for i, k in enumerate(dict.fromkeys(spk))}
+            seqs, constraints, sym_map = self.get_seqs_and_constraints(
+                c, o, l, spk, spk2int, collar=collar
+            )
+            fsa = self.build_topo_sort_fsa(seqs, constraints)
             if debug:
                 sym_str = ""
                 for sym, idx in fsa.symbols.items():
@@ -201,6 +215,13 @@ class MDCTCGraphCompiler(object):
                 fsa.labels_sym = k2.SymbolTable.from_str(sym_str)
                 fsa.draw("test_fsa.svg")
             ctc_topo = self.build_ctc_topo([int(i) for t in c for i in self.sp.encode(t)])
+            # Speaker attributed version below
+            #ctc_topo = self.build_ctc_topo(
+            #    [
+            #        i + spk2int[s]*(self.sp.vocab_size()-1)
+            #        for s, t in zip(spk, c) for i in self.sp.encode(t)
+            #    ]
+            #)
             ctc_topo = ctc_topo.to(self.device)
             fsa = fsa.to(self.device)
             fsa_with_self_loop = k2.remove_epsilon_and_add_self_loops(fsa)
@@ -242,9 +263,17 @@ class MDCTCGraphCompiler(object):
             :rtype: k2.Fsa
         """ 
         graphs = []
-        for i, (c, o, l) in enumerate(zip(cuts, offsets, lens)):
+        for c, o, l in zip(cuts, offsets, lens):
             seqs, constraints, sym_map = self.get_seqs_and_constraints(c, o, l)
-            fsa = self.build_topo_sort_fsa(seqs, constraints, sym_map, debug=debug)
+            fsa = self.build_topo_sort_fsa(seqs, constraints)
+            if debug:
+                sym_str = ""
+                for sym, idx in fsa.symbols.items():
+                    sym_str += f"{sym} {idx}\n"
+
+                # Create k2 SymbolTable from string
+                fsa.labels_sym = k2.SymbolTable.from_str(sym_str)
+                fsa.draw("test_fsa.svg")
             graphs.append(fsa)
         training_graphs = k2.create_fsa_vec(graphs)
         return training_graphs
@@ -254,7 +283,6 @@ class MDCTCGraphCompiler(object):
         self,
         sequences: List[Tuple],
         extra_constraints: List[Tuple],
-        sym_map: dict,
         debug: bool = False,
     ) -> k2.Fsa:
         """
@@ -275,8 +303,6 @@ class MDCTCGraphCompiler(object):
             :param extra_constraints: A list of tuples specifying additional precedence constraints
                                       between symbols (e.g., `[('a', 'd')]` enforces that `a` comes before `d`).
             :type extra_constraints: List[Tuple]
-            :param sym_map: A mapping from symbols to global token IDs (e.g., sentencepiece or vocabulary indices).
-            :type sym_map: dict
             :param debug: If True, enables additional debug output or diagnostics.
             :type debug: bool
             :return: An FSA that encodes all sequences consistent with the partial orders and constraints.
@@ -292,9 +318,14 @@ class MDCTCGraphCompiler(object):
         symbols = sorted(all_symbols)
         sym2id = {s: i for i, s in enumerate(symbols, 1)}  # k2 requires nonzero symbols
         id2sym = {i: s for s, i in sym2id.items()}
-        id2orig_id = {i: sym_map[s] for i, s in id2sym.items()} 
-        origsym2id = {self.sp.decode(id2orig_id[i]): id2orig_id[i] for i in id2sym}
-        id2origsym = {i: s for s, i in origsym2id.items()}
+        id2orig_id = {i: s[0] for i, s in id2sym.items()} 
+        # (vocabsize-1) Need to handle subtle case regarding not repeating the blank per speaker
+        #id2orig_id = {
+        #    i: s[0] + s[1]*(self.sp.vocab_size()-1)
+        #    for i, s in id2sym.items()
+        #}
+        #origsym2id = {self.sp.decode(id2orig_id[i]): id2orig_id[i] for i in id2sym}
+        #id2origsym = {i: s for s, i in origsym2id.items()}
 
         N = len(symbols)
         sym2index = {s: i for i, s in enumerate(symbols)}
@@ -374,12 +405,11 @@ class MDCTCGraphCompiler(object):
         
         if debug:
             # Relabel all of the labels according to the original bpe units
-            fsa.symbols = origsym2id
-            sym_str = []
-            for k, v in origsym2id.items():
-                sym_str.append(f"{str(k)} {str(v)}")
-            import pdb; pdb.set_trace()
-            fsa.labels_sym = k2.SymbolTable.from_str("\n".join(sym_str))
+            #new_labels = torch.zeros(len(fsa.arcs.values()), dtype=torch.int32)
+            for i, a in enumerate(fsa.arcs.values()):
+                if a[2] != -1:
+                    new_labels[i] = id2orig_id[a[2].item()]
+            #fsa.symbols = origsym2id
         return fsa
 
 

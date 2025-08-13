@@ -16,6 +16,7 @@ from typing import Union, Optional, List, Tuple, Dict
 import torch
 from collections import defaultdict, deque
 from itertools import groupby
+import logging
 
 
 # For now, this only works on CPU as far as I can tell
@@ -61,7 +62,6 @@ class MDCTCGraphCompiler(object):
         sp = spm.SentencePieceProcessor() 
         sp.load(str(bpe_model_file))
         self.sp = sp
-        #self.collar = collar
 
 
     def build_ctc_topo(self, symbols: List[int]) -> k2.Fsa:
@@ -154,22 +154,27 @@ class MDCTCGraphCompiler(object):
                 labels.append(pos_sym)
             seqs.append(labels)
        
-        num_constraints = 0 
+        num_constraints = 0
+        num_ovlps = 0  
         for ki in token_start_times:
             for kj in token_start_times:
+                # Only consider cross sequence comparisons
                 if ki[3] == kj[3]:
                     continue
-                # Only consider cross sequence comparisons
                 diff = token_start_times[ki] - token_start_times[kj]
-                far_enough = abs(diff) > collar
+                # hard constraints for different utterances by the same speaker
+                # or utterances that are far away
+                far_enough = abs(diff) > collar # or ki[1] == kj[1] 
                 if far_enough:
                     num_constraints += 1
+                else:
+                    num_ovlps += 1
                 if far_enough and diff < 0:
                     constraints.append((ki, kj))
                 elif far_enough:
                     constraints.append((kj, ki))
         #print(f"num_constraints: {num_constraints}")
-        return seqs, constraints, pos_sym_to_sym
+        return seqs, constraints, num_ovlps, pos_sym_to_sym
 
     def compile(
         self,
@@ -178,6 +183,8 @@ class MDCTCGraphCompiler(object):
         lens,
         spks,
         collar: int = 64000,
+        dynamic_collar: bool = False, 
+        max_overlaps: int = 6000, 
         debug: bool = False,
     ) -> k2.Fsa:
         """
@@ -195,17 +202,33 @@ class MDCTCGraphCompiler(object):
             :param lens: A batch of lengths (e.g., in frames or tokens) for each token in each transcript.
             :type lens: List[List[int]] or compatible structure
             :param spks: A batch of lists of speaker labels
+            :param dynamic_collar: Flag that says whether to dynamically estimate
+                the resulting graph size from the length and the amount of overlap
+                to keep the graph a manageable size
+            :type dynamic_collar: bool
             :param debug: Flag for debugging outputs
             :type debug: bool
+            :param max_overlaps: the maximum number of overlapping tokens allowed
+            :type max_overlaps: int 
             :return: A batched FSA (`FsaVec`) representing all input transcripts composed with a CTC topology.
             :rtype: k2.Fsa
         """
         graphs = []
         for c, o, l, spk in zip(cuts, offsets, lens, spks):
             spk2int = {k: i for i, k in enumerate(dict.fromkeys(spk))}
-            seqs, constraints, sym_map = self.get_seqs_and_constraints(
-                c, o, l, spk, spk2int, collar=collar
+            # Estimate
+            num_ovlps = max_overlaps + 1
+            collar_ = collar
+            seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints(
+                c, o, l, spk, spk2int, collar=collar_
             )
+            while num_ovlps > max_overlaps: 
+                collar_ = collar_ // 2
+                logging.info(f"Number of overlaps {num_ovlps} is > {max_overlaps}. Halving collar to {collar_}") 
+                seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints(
+                    c, o, l, spk, spk2int, collar=collar_
+                )
+            #print(f"ovlps: {num_ovlps}")
             fsa = self.build_topo_sort_fsa(seqs, constraints)
             if debug:
                 sym_str = ""
@@ -263,7 +286,7 @@ class MDCTCGraphCompiler(object):
         """ 
         graphs = []
         for c, o, l in zip(cuts, offsets, lens):
-            seqs, constraints, sym_map = self.get_seqs_and_constraints(c, o, l)
+            seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints(c, o, l)
             fsa = self.build_topo_sort_fsa(seqs, constraints)
             if debug:
                 sym_str = ""
@@ -321,7 +344,7 @@ class MDCTCGraphCompiler(object):
         id2orig_id = {
             i: s[0] + s[1]*(self.sp.vocab_size()-1)
             for i, s in id2sym.items()
-        } 
+        }
         #origsym2id = {self.sp.decode(id2orig_id[i]): id2orig_id[i] for i in id2sym}
         #id2origsym = {i: s for s, i in origsym2id.items()}
 
