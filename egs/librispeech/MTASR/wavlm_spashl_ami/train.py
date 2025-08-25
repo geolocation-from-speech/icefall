@@ -1020,24 +1020,24 @@ def train_one_epoch(
                         params.batch_idx_train,
                     )
 
-        #if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
-        #    logging.info("Computing validation loss")
-        #    valid_info = compute_validation_loss(
-        #        params=params,
-        #        model=model,
-        #        graph_compiler=graph_compiler,
-        #        valid_dl=valid_dl,
-        #        world_size=world_size,
-        #    )
-        #    model.train()
-        #    logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
-        #    logging.info(
-        #        f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-        #    )
-        #    if tb_writer is not None:
-        #        valid_info.write_summary(
-        #            tb_writer, "train/valid_", params.batch_idx_train
-        #        )
+        if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
+            logging.info("Computing validation loss")
+            valid_info = compute_validation_loss(
+                params=params,
+                model=model,
+                graph_compiler=graph_compiler,
+                valid_dl=valid_dl,
+                world_size=world_size,
+            )
+            model.train()
+            logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
+            logging.info(
+                f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+            )
+            if tb_writer is not None:
+                valid_info.write_summary(
+                    tb_writer, "train/valid_", params.batch_idx_train
+                )
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
