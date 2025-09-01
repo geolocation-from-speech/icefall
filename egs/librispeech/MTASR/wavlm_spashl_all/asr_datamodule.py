@@ -248,7 +248,8 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def train_cuts(self) -> CutSet:
         logging.info("About to get train cuts")
-        recordings = list(Path("data/manifests/ami_recordings").rglob("*.jsonl.gz"))
+        path = "/ocean/projects/cis210027p/scornell/mdctc/icefall/egs/librispeech/MTASR/manifests"
+        recordings = list(Path(path).rglob("*train*.jsonl.gz"))
         num_recos = len(recordings)
         weight = 1/num_recos
         cut_info = []
@@ -265,8 +266,8 @@ class LibriSpeechAsrDataModule:
             cutsets,
             cutset_weights=weights,
             cutset_prefixes=names,
-            final_max_duration=50,
             max_duration=20,
+            final_max_duration=50,
             max_duration_increment=1e-03,
             max_num_overlaps=3,
             max_splices=2,

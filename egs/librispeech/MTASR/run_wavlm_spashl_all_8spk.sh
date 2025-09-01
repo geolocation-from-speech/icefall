@@ -13,7 +13,7 @@ collar=32000
 
 python wavlm_spashl_ami/train.py \
   --lang-dir data/lang_bpe_5000 \
-  --exp-dir wavlm_spashl_ami/${exp_name} --num-workers 8 \
+  --exp-dir wavlm_spashl_all/${exp_name} --num-workers 8 \
   --world-size ${num_gpu} --use-fp16 True \
   --max-duration ${max_duration} \
   --base-lr ${lr} \

@@ -284,7 +284,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--total-steps", type=int, default=100000, help="The total number of "
+        "--total-steps", type=int, default=200000, help="The total number of "
         "steps for the lr_scheduler",
     )    
     
