@@ -20,8 +20,6 @@ import k2
 import torch
 import torch.nn as nn
 
-from mdctc_graph_compiler import MDCTCGraphCompiler
-
 
 class MDCTCModel(nn.Module):
     """It implements an MDCTC model with an auxiliary attention head."""
