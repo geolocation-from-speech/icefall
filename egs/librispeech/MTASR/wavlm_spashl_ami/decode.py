@@ -34,7 +34,6 @@ from train import (
     compute_avg_speaker_density_per_example,
 )
 
-from icefall.bpe_graph_compiler import BpeCtcTrainingGraphCompiler
 from icefall.checkpoint import (
     average_checkpoints,
     average_checkpoints_with_averaged_model,
@@ -48,7 +47,6 @@ from icefall.utils import (
     str2bool,
 )
 
-import asclite
 import time
 from tqdm import tqdm
 import json

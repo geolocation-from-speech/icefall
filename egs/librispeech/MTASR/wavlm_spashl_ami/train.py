@@ -42,23 +42,20 @@ import k2
 import torch.multiprocessing as mp
 import torch.nn as nn
 from asr_datamodule import LibriSpeechAsrDataModule
-from decoder import Decoder
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from lhotse import CutSet
 from model import MDCTCModel
-from optim import Eden, LRScheduler, ScaledAdam
+from optim import LRScheduler 
 from torch.optim import Adam
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.tensorboard import SummaryWriter
-from zipformer import Zipformer
 
 from icefall import diagnostics
-#from mdctc_graph_compiler import MDCTCGraphCompiler
 from mdctc_graph_compiler2 import MDCTCGraphCompiler
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
 from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
@@ -152,7 +149,7 @@ def get_parser():
     parser.add_argument(
         "--exp-dir",
         type=str,
-        default="zipformer_mdctc/exp",
+        default="wavlm_spashl_ami/exp",
         help="""The experiment dir.
         It specifies the directory where all training related
         files, e.g., checkpoints, log, etc, are saved
@@ -1138,20 +1135,6 @@ def run(rank, world_size, args):
             model.freeze_encoder()
         for param_group in optimizer.param_groups:
             param_group['lr'] = args.freeze_lr 
-
-    #optimizer = ScaledAdam(
-    #    model.parameters(),
-    #    lr=params.base_lr,
-    #    clipping_scale=2.0,
-    #    parameters_names=parameters_names,
-    #)
-
-    #scheduler = Eden(
-    #    optimizer,
-    #    params.lr_batches,
-    #    params.lr_epochs,
-    #    warmup_batches=1000
-    #)
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
