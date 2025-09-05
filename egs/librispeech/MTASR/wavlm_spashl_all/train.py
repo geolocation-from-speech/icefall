@@ -42,23 +42,19 @@ import k2
 import torch.multiprocessing as mp
 import torch.nn as nn
 from asr_datamodule import LibriSpeechAsrDataModule
-from decoder import Decoder
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from lhotse import CutSet
 from model import MDCTCModel
-from optim import Eden, LRScheduler, ScaledAdam
 from torch.optim import Adam
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.tensorboard import SummaryWriter
-from zipformer import Zipformer
 
 from icefall import diagnostics
-#from mdctc_graph_compiler import MDCTCGraphCompiler
 from mdctc_graph_compiler2 import MDCTCGraphCompiler
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
 from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
@@ -83,7 +79,7 @@ import numpy as np
 import torchaudio
 
 
-LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, LRScheduler]
+LRSchedulerType = torch.optim.lr_scheduler._LRScheduler
 
 
 def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
@@ -368,8 +364,6 @@ def get_params() -> AttributeDict:
 
         - head: Number of heads of multi-head attention model.
 
-        - num_decoder_layers: Number of decoder layer of transformer decoder.
-
         - beam_size: It is used in k2.ctc_loss
 
         - reduction: It is used in k2.ctc_loss
@@ -626,16 +620,16 @@ def compute_loss(
     feature_lens = feature_lens.to(device)
     texts = batch["texts"]
     speakers = batch["speakers"]
+    sort_orders = batch["sort_orders"] 
     seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
-        batch['supervisions']['start_sample'][seq_idx == i].tolist()
+        [batch['supervisions']['start_sample'][seq_idx == i][j].item() for j in sort_orders[i]]
         for i in range(seq_idx.max()+1)
     ]
     num_frames_init = [
-        batch['supervisions']['num_samples'][seq_idx == i].tolist()
+        [batch['supervisions']['num_samples'][seq_idx == i][j].item() for j in sort_orders[i]]
         for i in range(seq_idx.max()+1)
     ]
-    #beam_factor = max(0.3, (100000 - params.batch_idx_train)/100000)
     beam_factor = 1
     with torch.set_grad_enabled(is_training):
         start = time.time()
@@ -1084,7 +1078,6 @@ def run(rank, world_size, args):
     graph_compiler = MDCTCGraphCompiler(
         params.lang_dir,
         device='cpu',
-        #collar=params.collar,
     )
 
     params.vocab_size = graph_compiler.sp.vocab_size()

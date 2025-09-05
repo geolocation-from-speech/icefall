@@ -178,6 +178,12 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
 
         # Sort the cuts again after transforms
         cuts = cuts.sort_by_duration(ascending=False)
+        #if self.is_training:
+        #    # in training select random channel from mdm
+        #    cuts = CutSet.from_cuts([random_mono_cut(x, None) for x in cuts])
+        #else:
+        #    cuts = CutSet.from_cuts([random_mono_cut(x, 0) for x in cuts])
+
         inputs, input_lens = collate_audio(cuts)
         inputs = inputs.to(torch.float32)
         # Get a dict of tensors that encode the positional information about supervisions
@@ -200,15 +206,21 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         segments = torch.stack(list(supervision_intervals.values()), dim=1)
         for tnfm in self.input_transforms:
             inputs = tnfm(inputs, supervision_segments=segments)
+ 
+        cuts_start_times = [[s.start for s in c.supervisions] for c in cuts]
+        sort_orders = [
+            sorted(range(len(cst)), key=lambda i: cst[i])
+            for cst in cuts_start_times
+        ]
 
         texts = [
-            [s.text for s in sorted(c.supervisions, key=lambda x: x.start)]
-            for c in cuts
+            [cuts[c_idx].supervisions[i].text.upper() for i in sort_order]
+            for c_idx, sort_order in enumerate(sort_orders)
         ]
 
         speakers = [
-            [s.speaker if s.speaker is not None else "noise" for s in sorted(c.supervisions, key=lambda x: x.start)]
-            for c in cuts
+            [cuts[c_idx].supervisions[i].speaker if cuts[c_idx].supervisions[i].speaker is not None else "noise" for i in sort_order]
+            for c_idx, sort_order in enumerate(sort_orders)
         ]
 
         batch = {
@@ -216,7 +228,7 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
             "supervisions": default_collate(
                 [
                     {
-                        "text": supervision.text,
+                        "text": supervision.text.upper(),
                     }
                     for sequence_idx, cut in enumerate(cuts)
                     for supervision in cut.supervisions
@@ -224,6 +236,7 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
             ),
             "texts": texts,
             "speakers": speakers,
+            "sort_orders": sort_orders,
             "num_frames": input_lens,
             "max_density": max_density,
         }
@@ -307,19 +320,16 @@ def has_empty_supervisions(cuts):
     return False
 
 
-def extract_texts_from(cuts):
-    texts = []
-    for c in cuts:
-        groups = groupby(
-            sorted(c.supervisions, key=lambda x: 'noise' if x.speaker is None else x.speaker),
-            lambda x: 'noise' if x.speaker is None else x.speaker
-        )
-        cut_texts = []
-        for k, g in groups:
-            g_ = list(g)
-            text_ = " ".join([g_i.text for g_i in g_])
-            text_ = re.sub(r" +", " ", text_)
-            text_ = re.sub(r"^ ", "", text_)
-            cut_texts.append(text_)
-        texts.append(cut_texts)
-    return texts
+def random_mono_cut(cut, fix_channel=None):
+    if isinstance(cut, MonoCut):
+        return cut
+    elif isinstance(cut, MultiCut):
+        if fix_channel is None:
+            channel = random.choice(cut.channel)
+        else:
+            channel = fix_channel
+
+        return cut.to_mono()[channel]
+    else:
+        raise ValueError(f"Unexpected cut type: {type(cut)}")
+
