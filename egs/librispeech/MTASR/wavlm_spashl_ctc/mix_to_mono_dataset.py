@@ -20,7 +20,7 @@ from lhotse.utils import compute_num_frames, ifnone
 from lhotse.workarounds import Hdf5MemoryIssueFix
 
 
-class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
+class K2MixToMonoDataset(torch.utils.data.Dataset):
     """
     The PyTorch Dataset for the multi-talker ASR task using k2 library.
     We support the modeling framework known as Streaming Unmixing and Recognition
@@ -162,6 +162,19 @@ class K2MultiTalkerSpeechRecognitionDataset(torch.utils.data.Dataset):
         """
         self.hdf5_fix.update()
 
+        # First we need to extract the monocuts
+        new_cuts = []
+        for c in cuts:
+            for i, t in enumerate(c.tracks):
+                new_cut = t.cut
+                offset = t.offset
+                duration = t.cut.duration
+                if offset > 0:
+                    new_cut = new_cut.pad(offset + duration, direction='left')
+                new_cuts.append(new_cut.with_id(f"{c.id}-{i}"))
+        
+        cuts = CutSet.from_cuts(new_cuts)
+        
         # Sort the cuts by duration so that the first one determines the batch time dimensions.
         cuts = cuts.sort_by_duration(ascending=False)
         

@@ -46,6 +46,9 @@ from icefall.utils import (
     str2bool,
 )
 
+import asclite
+import asclite2
+
 import time
 from tqdm import tqdm
 import json
@@ -166,7 +169,24 @@ def get_parser():
         type=float,
         default=1.0,
     )
+    
+    parser.add_argument(
+        "--collar",
+        type=int,
+        default=64000,
+    )
 
+    parser.add_argument(
+        "--marginal",
+        type=str2bool,
+        default=True
+    )
+
+    parser.add_argument(
+        "--score",
+        type=str2bool,
+        default=True,
+    )
     return parser
 
 
@@ -304,26 +324,31 @@ def decode_one_batch(
     feature = feature.to(device)
     texts = [[t.strip() for t in b] for b in batch["texts"]]
     speakers = batch["speakers"]
-    sort_orders = batch["sort_orders"] 
     seq_idx = batch['supervisions']['sequence_idx']
     start_frames = [
-        [batch['supervisions']['start_sample'][seq_idx == i][j].item() for j in sort_orders[i]]
+        batch['supervisions']['start_sample'][seq_idx == i].tolist()
         for i in range(seq_idx.max()+1)
     ]
     num_frames_init = [
-        [batch['supervisions']['num_samples'][seq_idx == i][j].item() for j in sort_orders[i]]
+        batch['supervisions']['num_samples'][seq_idx == i].tolist()
         for i in range(seq_idx.max()+1)
     ]
-    
+
     with torch.set_grad_enabled(False):
         start = time.time()
-        ctc_output, x_lens = model(
-            feature,
-            feature_lens,
-            speaker_weight = params.speaker_weight,
-        )
+        if params.marginal:
+            ctc_output, x_lens = model.forward_tokens_only(
+                feature,
+                feature_lens,
+            ) 
+        else:
+            ctc_output, x_lens = model(
+                feature,
+                feature_lens,
+                params.speaker_weight,
+            )
         end_nnet = time.time()
-        subsampling_factor = 4 if params.downsample else 2
+        subsampling_factor = params.subsampling_factor
         use_double_scores = params.use_double_scores
 
 
@@ -346,6 +371,14 @@ def decode_one_batch(
 
     # Works with a BPE model
     densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
+    
+    if params.score:
+        decoding_graphs = graph_compiler.compile_transcript(
+            texts,
+            start_frames,
+            num_frames_init,
+            collar = params.collar
+        )
 
     ctc_output[..., 0] -= params.blank_weight
     preds = ctc_output.argmax(-1)
@@ -354,50 +387,55 @@ def decode_one_batch(
         preds[i].unique_consecutive(dim=-1)[preds[i].unique_consecutive(dim=-1) != 0].squeeze(0)
         for i in range(preds.size(0))
     ]
-    spks = [
-        hyps[i] // (params.vocab_size - 1)
-        for i in range(preds.size(0))
-    ]
     units = [
-        hyps[i].remainder((params.vocab_size - 1))
+        hyps[i].remainder((params.vocab_size - 1)).view(-1).tolist()
         for i in range(preds.size(0))
     ]
     
     cut_ids = [c.id for c in batch["supervisions"]["cut"]]
-    tokens = {}
-    for i, (cut_id, s, u, t) in enumerate(zip(cut_ids, spks, units, times)):
-        spk2int = {k: j for j, k in enumerate(dict.fromkeys(speakers[i]))}
-        int2spk = {j: k for k, j in spk2int.items()}
-        speaker_hyps = {}
-        speaker_refs = {}
-        for s_i in range(params.max_num_spks): 
-            if s_i in s:
-                speaker_hyps[s_i] = merge_bpe_with_times(
-                    graph_compiler.sp,
-                    u[s == s_i],
-                    [t_.item() for t_ in t[s == s_i]],
-                    (x_lens[i]+1)*params.frame_duration
-                )
-            if s_i in int2spk: 
-                text_i = []
-                found_start = False
-                curr_dur = 0
-                for j, (text, spk) in enumerate(zip(texts[i], speakers[i])):
-                    if spk2int[spk] == s_i:
-                        if not found_start:
-                            start_i = start_frames[i][j]
-                            found_start = True
-                        curr_dur = start_frames[i][j] + num_frames_init[i][j]
-                        text_i.append(text)
-                text_i = " ".join(text_i)
-                speaker_refs[s_i] = (
-                    graph_compiler.sp.decode(text_i),
-                    start_i * (1/16000),
-                    curr_dur * (1/16000),
-                )
-        stm_hyp = hyp_to_stm(speaker_hyps, cut_id)
-        stm_ref = ref_to_stm(speaker_refs, cut_id)
-        yield stm_hyp, stm_ref
+    
+    if params.score:
+        errors, total, ter, alis, dels, ins, subs, corr = asclite.compute_ter(decoding_graphs, units)
+        tokens = {}
+        for idx, (hyp_ids, ref_ids) in enumerate(alis):
+            tokens_ = []
+            start_idx = 0
+            t = torch.LongTensor([0])
+            for i, j in zip(hyp_ids, ref_ids):
+                if i != 0:
+                    t = times[idx][start_idx]
+                    start_idx += 1
+                    if start_idx >= len(times[idx]):
+                        duration = (num_frames[idx] * params.frame_duration) - t.cpu()
+                    else:
+                        duration = times[idx][start_idx] - t.cpu()
+
+                h = graph_compiler.sp.id_to_piece(i)
+                r = graph_compiler.sp.id_to_piece(j)
+                tokens_.append([h, r, t.item(), duration.item()])
+            tokens[cut_ids[idx]] = tokens_
+    else:
+        tokens = {}
+        for idx, cut_id in enumerate(cut_ids):
+            tokens_ = []
+            start_idx = 0
+            t = torch.LongTensor([0])
+            for i in units[idx]:
+                if i != 0:
+                    t = times[idx][start_idx]
+                    start_idx += 1
+                    if start_idx >= len(times[idx]):
+                        duration = (num_frames[idx] * params.frame_duration) - t.cpu()
+                    else:
+                        duration = times[idx][start_idx] - t.cpu()
+
+                h = graph_compiler.sp.id_to_piece(i)
+                tokens_.append([h, "", t.item(), duration.item()])
+            tokens[cut_ids[idx]] = tokens_
+        errors = ter = dels = ins = subs = corr = 0
+        total = 1
+
+    return errors, total, ter, tokens, dels, ins, subs, corr
 
 
 def decode_dataset(
@@ -432,23 +470,39 @@ def decode_dataset(
         num_batches = "?"
 
     results = defaultdict(list)
-    hyps, refs = [], []
+    ters = []
+    errors = 0
+    total = 0
+    dels, ins, subs, corr = 0, 0, 0, 0
+    tokens = {}
     for batch_idx, batch in tqdm(enumerate(dl)):
         texts = batch["supervisions"]["text"]
-        for hyps_, refs_ in decode_one_batch(
-                params=params,
-                model=model,
-                graph_compiler=graph_compiler,
-                batch=batch,
-            ):
-            hyps.extend(hyps_)
-            refs.extend(refs_)
+        errors_, total_, ter, tokens_, d, i, s, c = decode_one_batch(
+            params=params,
+            model=model,
+            graph_compiler=graph_compiler,
+            batch=batch,
+        )
+        ters.append(ter)
+        tokens.update(tokens_)
+        errors += errors_
+        total += total_
+        dels += d
+        ins += i
+        subs += s
+        corr += c
         batch_str = f"{batch_idx}/{num_batches}"
         logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
-    hyps = sorted(hyps, key=lambda x: (x["session_id"], x["start_time"]))
-    refs = sorted(refs, key=lambda x: (x["session_id"], x["start_time"]))
-    return hyps, refs
-
+        logging.info(f"ter: {ter}")
+    results["ter"] = errors / total
+    results["ter_indv"] = ters
+    results["errors"] = errors
+    results["total"] = total
+    results["dels"] = dels
+    results["ins"] = ins
+    results["subs"] = subs
+    results["corr"] = corr
+    return results, tokens
 
 
 @torch.no_grad()
@@ -600,23 +654,50 @@ def main():
     test_dl = [test_sets_dict[t] for t in test_sets]
 
     for set, dl in zip(test_sets, test_dl):
-        hyps, refs = decode_dataset(
+        results_dict, tokens = decode_dataset(
             dl=dl,
             params=params,
             model=model,
             graph_compiler=graph_compiler,
         )
     
-        decode_dir = params.exp_dir / "decode"
+        decode_dir = params.exp_dir / "decode_token"
         decode_dir.mkdir(parents=True, exist_ok=True)
-        with open(decode_dir / f"hyps_chkpt{params.iter}_avg{params.avg}_{set}_{params.suffix}.stm", "w") as f:
-            for l in hyps:
-                print(f"{l['session_id']} 1 {l['speaker']} {l['start_time']} {l['end_time']} {l['words']}", file=f)
-        
-        with open(decode_dir / f"refs_chkpt{params.iter}_avg{params.avg}_{set}_{params.suffix}.stm", "w") as f:
-            for l in refs:
-                print(f"{l['session_id']} 1 {l['speaker']} {l['start_time']} {l['end_time']} {l['words']}", file=f)
+        if params.score:
+            with open(decode_dir / f"results_chkpt{params.iter}_avg{params.avg}_{params.suffix}_collar{params.collar}_{set}.json", "w") as f:
+                json.dump(results_dict, f, indent=4)    
 
+            with open(decode_dir / f"alignments_chkpt{params.iter}_avg{params.avg}_{params.suffix}_{set}.txt", "w") as f:
+                for uttid in tokens:
+                    seq = tokens[uttid]
+                    hyp_tokens = [pair[0] for pair in seq]
+                    ref_tokens = [pair[1] for pair in seq]
+                    widths = [max(len(h), len(r)) for h, r in zip(hyp_tokens, ref_tokens)]
+                    # Pad each token to column width
+                    ref_line = "ref: " + "  ".join(r.ljust(w) for r, w in zip(ref_tokens, widths))
+                    hyp_line = "hyp: " + "  ".join(h.ljust(w) for h, w in zip(hyp_tokens, widths))
+                    print(ref_line, file=f)
+                    print(hyp_line, file=f)
+                    print("", file=f)
+	
+            with open(decode_dir / f"alignments_chkpt{params.iter}_avg{params.avg}_{params.suffix}_{set}.json", "w") as f:
+                json.dump(tokens, f, indent=4)
+    
+            with open(decode_dir / f"alignments_chkpt{params.iter}_avg{params.avg}_{params.suffix}_{set}.stm", "w") as f:
+                for uttid in tokens:
+                    seq = tokens[uttid]
+                    seq_tokens = " ".join([s[1] for s in seq])
+                    seq_end = seq[-1][2] + seq[-1][3]
+                    print(f"{uttid} 0 A 0 {seq_end:.2f} {seq_tokens}", file=f) 
+
+        with open(decode_dir / f"alignments_chkpt{params.iter}_avg{params.avg}_{params.suffix}_{set}.ctm", "w") as f:
+            for uttid in tokens:
+                seq = tokens[uttid]
+                for h, r, beg, dur in seq:
+                    if h != "<blk>":
+                        print(f"{uttid} 0 {beg:.2f} {dur:.2f} {h}", file=f)
+
+        
     logging.info("Done!")
 
 

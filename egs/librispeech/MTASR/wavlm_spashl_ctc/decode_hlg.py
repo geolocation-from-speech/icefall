@@ -22,6 +22,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import k2
 from mdctc_graph_compiler import MDCTCGraphCompiler
 import torch
 import torch.nn as nn
@@ -32,6 +33,8 @@ from train import (
     get_params,
     compute_avg_speaker_density_per_example,
 )
+
+from icefall.lexicon import Lexicon
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -44,6 +47,14 @@ from icefall.utils import (
     load_averaged_model,
     setup_logger,
     str2bool,
+)
+
+from icefall.decode import (
+    get_lattice,
+    one_best_decoding,
+    rescore_with_whole_lattice,
+    rescore_with_n_best_list,
+    nbest_rescore_with_LM,
 )
 
 import time
@@ -113,6 +124,12 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--acoustic-weight",
+        type=float,
+        default=3.0
+    )
+
+    parser.add_argument(
         "--max-num-spks",
         type=int,
         default=2,
@@ -150,6 +167,12 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--target-spks",
+        type=str,
+        default=None
+    )
+
+    parser.add_argument(
         "--test-sets",
         type=str,
         default=None,
@@ -158,13 +181,33 @@ def get_parser():
     parser.add_argument(
         "--sort-strategy",
         type=str,
-        default="start_time"
+        default="start_time",
     )
 
     parser.add_argument(
-        "--speaker-weight",
-        type=float,
-        default=1.0,
+        "--modified",
+        type=str2bool,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--lm-dir",
+        type=str,
+        default="data/lm",
+        help="N-gram model (.fst.txt) for rescoring"
+    )
+
+    parser.add_argument(
+        "--rescore",
+        type=str2bool,
+        default=False,
+        help="Whether or not to rescore"
+    )
+
+    parser.add_argument(
+        "--num-paths",
+        type=int,
+        default=100,
     )
 
     return parser
@@ -262,6 +305,8 @@ def decode_one_batch(
     model: nn.Module,
     graph_compiler: MDCTCGraphCompiler,
     batch: dict,
+    graph,
+    rescore,
 ) -> Dict[str, List[List[str]]]:
     """Decode one batch and return the result in a dict. The dict has the
     following format:
@@ -304,8 +349,12 @@ def decode_one_batch(
     feature = feature.to(device)
     texts = [[t.strip() for t in b] for b in batch["texts"]]
     speakers = batch["speakers"]
-    sort_orders = batch["sort_orders"] 
+    target_spks = [i for i in range(params.max_num_spks)]
+    if params.target_spks is not None:
+        target_spks = [int(s) for s in params.target_spks.split()]
+    
     seq_idx = batch['supervisions']['sequence_idx']
+    sort_orders = batch["sort_orders"] 
     start_frames = [
         [batch['supervisions']['start_sample'][seq_idx == i][j].item() for j in sort_orders[i]]
         for i in range(seq_idx.max()+1)
@@ -314,90 +363,156 @@ def decode_one_batch(
         [batch['supervisions']['num_samples'][seq_idx == i][j].item() for j in sort_orders[i]]
         for i in range(seq_idx.max()+1)
     ]
-    
-    with torch.set_grad_enabled(False):
+
+    with torch.inference_mode():
         start = time.time()
-        ctc_output, x_lens = model(
+        x_lens, ctc_outputs_ = model.forward_target_speaker(
             feature,
             feature_lens,
-            speaker_weight = params.speaker_weight,
+            speakers=target_spks, 
         )
         end_nnet = time.time()
-        subsampling_factor = 4 if params.downsample else 2
+        subsampling_factor = params.subsampling_factor
         use_double_scores = params.use_double_scores
-
-
-    # Decoding with WFST supervisions
-    sequence_idx = torch.arange(
-        0, x_lens.size(0),
-    ).unsqueeze(0).t().to(torch.int32)
-
-    start_frame = torch.zeros(
-        [x_lens.size(0)], dtype=torch.int32,
-    ).unsqueeze(0).t()
-
-    num_frames = x_lens.unsqueeze(1).to(torch.int32).cpu()
-
-    supervision_segments = torch.cat(
-        [sequence_idx, start_frame, num_frames],
-        dim=1,
-    )
-    supervision_segments = supervision_segments.to(torch.int32)
-
-    # Works with a BPE model
-    densities = compute_avg_speaker_density_per_example(start_frames, num_frames_init)
-
-    ctc_output[..., 0] -= params.blank_weight
-    preds = ctc_output.argmax(-1)
-    times = get_nonzero_span_starts(preds, params)
-    hyps = [
-        preds[i].unique_consecutive(dim=-1)[preds[i].unique_consecutive(dim=-1) != 0].squeeze(0)
-        for i in range(preds.size(0))
-    ]
-    spks = [
-        hyps[i] // (params.vocab_size - 1)
-        for i in range(preds.size(0))
-    ]
-    units = [
-        hyps[i].remainder((params.vocab_size - 1))
-        for i in range(preds.size(0))
-    ]
     
-    cut_ids = [c.id for c in batch["supervisions"]["cut"]]
-    tokens = {}
-    for i, (cut_id, s, u, t) in enumerate(zip(cut_ids, spks, units, times)):
-        spk2int = {k: j for j, k in enumerate(dict.fromkeys(speakers[i]))}
-        int2spk = {j: k for k, j in spk2int.items()}
-        speaker_hyps = {}
-        speaker_refs = {}
-        for s_i in range(params.max_num_spks): 
-            if s_i in s:
-                speaker_hyps[s_i] = merge_bpe_with_times(
-                    graph_compiler.sp,
-                    u[s == s_i],
-                    [t_.item() for t_ in t[s == s_i]],
-                    (x_lens[i]+1)*params.frame_duration
+    ctc_outputs = [c.clone() for c in ctc_outputs_]
+    for c in ctc_outputs_:
+        del c
+    del feature
+    torch.cuda.empty_cache()
+    for tgtspk in target_spks:
+        logging.info(f"tgtspk: {tgtspk}")
+        # Decoding with WFST supervisions
+        sequence_idx = torch.arange(
+            0, x_lens.size(0),
+        ).unsqueeze(0).t().to(torch.int32)
+
+        start_frame = torch.zeros(
+            [x_lens.size(0)], dtype=torch.int32,
+        ).unsqueeze(0).t()
+
+        num_frames = x_lens.unsqueeze(1).to(torch.int32).cpu()
+
+        supervision_segments = torch.cat(
+            [sequence_idx, start_frame, num_frames],
+            dim=1,
+        )
+        supervision_segments = supervision_segments.to(torch.int32)
+
+        ctc_outputs[tgtspk][..., 0] -= params.blank_weight
+        
+        lattice = get_lattice(
+            nnet_output=ctc_outputs[tgtspk] * params.acoustic_weight,
+            decoding_graph=graph,
+            supervision_segments=supervision_segments,
+            search_beam=params.search_beam,
+            output_beam=params.output_beam,
+            min_active_states=params.min_active_states,
+            max_active_states=params.max_active_states,
+            subsampling_factor=params.subsampling_factor,
+        )
+        
+        if params.rescore:
+            lm_scale_list = [0.000001, 0.00001, 0.0001, 0.001, 0.005, 0.01, 0.05]
+            #best_path_dict = rescore_with_whole_lattice(
+            #    lattice=lattice,
+            #    G_with_epsilon_loops=rescore,
+            #    lm_scale_list=lm_scale_list,
+            #)
+            #best_path_dict = rescore_with_n_best_list(
+            if x_lens[0] < 800: 
+                best_path_dict = nbest_rescore_with_LM(
+                    lattice=lattice,
+                    LM=rescore,
+                    num_paths=params.num_paths,
+                    lm_scale_list=lm_scale_list,
+                    nbest_scale=0.7,
                 )
-            if s_i in int2spk: 
-                text_i = []
-                found_start = False
-                curr_dur = 0
-                for j, (text, spk) in enumerate(zip(texts[i], speakers[i])):
-                    if spk2int[spk] == s_i:
-                        if not found_start:
-                            start_i = start_frames[i][j]
-                            found_start = True
-                        curr_dur = start_frames[i][j] + num_frames_init[i][j]
-                        text_i.append(text)
-                text_i = " ".join(text_i)
-                speaker_refs[s_i] = (
-                    graph_compiler.sp.decode(text_i),
-                    start_i * (1/16000),
-                    curr_dur * (1/16000),
+            else:
+                logging.info(f"len: {x_lens[0]}. Falling back ...")
+                one_best_decode = one_best_decoding(
+                    lattice=lattice,
+                    use_double_scores=params.use_double_scores
                 )
-        stm_hyp = hyp_to_stm(speaker_hyps, cut_id)
-        stm_ref = ref_to_stm(speaker_refs, cut_id)
-        yield stm_hyp, stm_ref
+
+                best_path_dict = {
+                    "lm_scale_f{scale}": one_best_decode
+                    for scale in lm_scale_list
+                }
+        else:
+            best_path_dict = {
+                "lm_scale_1.0": one_best_decoding(
+                    lattice=lattice, use_double_scores=params.use_double_scores
+                )
+            }
+       
+        for lm_scale_str, best_path in best_path_dict.items():
+            labels_t = best_path.labels.contiguous()
+            frames_t = best_path.frame.contiguous()
+
+            # arc_shape: collapses arc axis so shape corresponds to arc-level values per FSA
+            arc_shape = best_path.arcs.shape().remove_axis(1)  # typically [B][num_arcs_in_path]
+
+            # Build a RaggedTensor for all labels (no filtering yet)
+            ragged_all_labels = k2.RaggedTensor(arc_shape, labels_t)
+
+            # Remove all non-positive labels (<=0: blanks and possibly -1 sentinels)
+            units = ragged_all_labels.remove_values_leq(0)
+            # ragged_clean_labels.shape is now the correct ragged shape for the filtered values
+
+            # Build the frames ragged using the SAME shape and the filtered frame values.
+            # Compute boolean mask on the original flat tensors to get the same set of kept indices:
+            keep_mask = (labels_t > 0)  # True for values we kept; this matches remove_values_leq(0)
+
+            frames_kept = frames_t[keep_mask]
+
+            # Now build ragged frames with the *new* shape
+            ragged_frames = k2.RaggedTensor(units.shape, frames_kept)
+            times = k2.RaggedTensor(ragged_frames.shape, ragged_frames.values * params.frame_duration)
+            
+            spks = []
+            for i in range(units.shape.dim0):
+                spks_ = []
+                for j in units[i].view(-1):
+                    spks_.append(tgtspk)
+                spks.append(torch.LongTensor(spks_))
+
+            
+            cut_ids = [c.id for c in batch["supervisions"]["cut"]]
+            tokens = {}
+            for i, (cut_id, s, u, t) in enumerate(zip(cut_ids, spks, units, times)):
+                spk2int = {k: j for j, k in enumerate(dict.fromkeys(speakers[i]))}
+                int2spk = {j: k for k, j in spk2int.items()}
+                speaker_hyps = {}
+                speaker_refs = {}
+                s_i = tgtspk
+                if s_i in s:
+                    speaker_hyps[s_i] = merge_bpe_with_times(
+                        graph_compiler.sp,
+                        u.view(-1)[s == s_i],
+                        [t_.item() for t_ in t[s == s_i]],
+                        (x_lens[i]+1)*params.frame_duration
+                    )
+                if s_i in int2spk: 
+                    text_i = []
+                    found_start = False
+                    curr_dur = 0
+                    for j, (text, spk) in enumerate(zip(texts[i], speakers[i])):
+                        if spk2int[spk] == s_i:
+                            if not found_start:
+                                start_i = start_frames[i][j]
+                                found_start = True
+                            curr_dur = start_frames[i][j] + num_frames_init[i][j]
+                            text_i.append(text)
+                    text_i = " ".join(text_i)
+                    speaker_refs[s_i] = (
+                        graph_compiler.sp.decode(text_i),
+                        start_i * (1/16000),
+                        curr_dur * (1/16000),
+                    )
+                stm_hyp = hyp_to_stm(speaker_hyps, cut_id)
+                stm_ref = ref_to_stm(speaker_refs, cut_id)
+                yield lm_scale_str, stm_hyp, stm_ref
 
 
 def decode_dataset(
@@ -405,6 +520,8 @@ def decode_dataset(
     params: AttributeDict,
     model: nn.Module,
     graph_compiler: MDCTCGraphCompiler,
+    graph,
+    G,
 ) -> Dict[str, List[Tuple[str, List[str], List[str]]]]:
     """Decode dataset.
 
@@ -432,22 +549,36 @@ def decode_dataset(
         num_batches = "?"
 
     results = defaultdict(list)
+    lm_scales = {}
     hyps, refs = [], []
+    num_cuts = 0
     for batch_idx, batch in tqdm(enumerate(dl)):
         texts = batch["supervisions"]["text"]
-        for hyps_, refs_ in decode_one_batch(
+        num_cuts += batch["inputs"].size(0)
+        for lm_scale_str, hyps_, refs_ in decode_one_batch(
                 params=params,
                 model=model,
                 graph_compiler=graph_compiler,
+                graph=graph,
                 batch=batch,
+                rescore=G,
             ):
-            hyps.extend(hyps_)
-            refs.extend(refs_)
+            if lm_scale_str not in lm_scales:
+                lm_scales[lm_scale_str] = {'hyps': [], 'refs': []}
+            lm_scales[lm_scale_str]['hyps'].extend(hyps_)
+            lm_scales[lm_scale_str]['refs'].extend(refs_)
         batch_str = f"{batch_idx}/{num_batches}"
         logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
-    hyps = sorted(hyps, key=lambda x: (x["session_id"], x["start_time"]))
-    refs = sorted(refs, key=lambda x: (x["session_id"], x["start_time"]))
-    return hyps, refs
+    for lm_scale in lm_scales:
+        lm_scales[lm_scale]['hyps'] = sorted(
+            lm_scales[lm_scale]['hyps'],
+            key=lambda x: (x["session_id"], x["start_time"])
+        )
+        lm_scales[lm_scale]['refs'] = sorted(
+            lm_scales[lm_scale]['refs'],
+            key=lambda x: (x["session_id"], x["start_time"])
+        )
+    return lm_scales
 
 
 
@@ -458,6 +589,7 @@ def main():
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
     args.lang_dir = Path(args.lang_dir)
+    args.lm_dir = Path(args.lm_dir)
 
     params = get_params()
     params.update(vars(args))
@@ -578,7 +710,6 @@ def main():
     lsm_2 = librispeech.librispeechmix_2_cuts()
     lsm_3 = librispeech.librispeechmix_3_cuts()
 
-
     synth_dl = librispeech.valid_dataloaders(synth_cuts)
     l2m_test_both_dl = librispeech.valid_dataloaders(l2m_test_both)
     l2m_test_clean_dl = librispeech.valid_dataloaders(l2m_test_clean)
@@ -587,35 +718,104 @@ def main():
     ls_test_clean_dl = librispeech.valid_dataloaders(ls_test_clean)
     lsm_2_dl = librispeech.valid_dataloaders(lsm_2)
     lsm_3_dl = librispeech.valid_dataloaders(lsm_3)
-    
+
     lcss_dl = librispeech.valid_dataloaders(libricss)
     ami_dev_dl = librispeech.valid_dataloaders(ami_dev)
 
+
     test_sets = ["synth", "libri3mix", "l2m_test_clean", "l2m_test_both", "lsm_2", "lsm_3", "ls_test_other", "ls_test_clean", "lcss", "ami_dev"]
     test_dl = [synth_dl, l3m_test_clean_dl, l2m_test_clean_dl, l2m_test_both_dl, lsm_2_dl, lsm_3_dl, ls_test_other_dl, ls_test_clean_dl, lcss_dl, ami_dev_dl]
-
     test_sets_dict = dict(zip(test_sets, test_dl))
     if params.test_sets is not None:
         test_sets = params.test_sets.split() 
     test_dl = [test_sets_dict[t] for t in test_sets]
 
+    logging.info("Getting Decoding (HLG) graph ...")
+    if not params.modified:
+        HLG = k2.Fsa.from_dict(
+            torch.load(f"{params.lang_dir}/HLG.pt", map_location=device, weights_only=False)
+        )
+    else:
+        HLG = k2.Fsa.from_dict(
+            torch.load(f"{params.lang_dir}/HLG_modified.pt", map_location=device, weights_only=False)
+        )
+
+    assert HLG.requires_grad is False
+
+    if not hasattr(HLG, "lm_scores"):
+        HLG.lm_scores = HLG.scores.clone()
+
+    if params.rescore:
+        if not (params.lm_dir / "G_4_gram.pt").is_file():
+            logging.info("Loading G_4_gram.fst.txt")
+            logging.warning("It may take 8 minutes.")
+            with open(params.lm_dir / "G_4_gram.fst.txt") as f:
+                lexicon = Lexicon(params.lang_dir)
+                max_token_id = max(lexicon.tokens)
+                num_classes = max_token_id + 1  # +1 for the blank
+                params.vocab_size = num_classes
+
+                first_word_disambig_id = lexicon.word_table["#0"]
+
+                G = k2.Fsa.from_openfst(f.read(), acceptor=False)
+                # G.aux_labels is not needed in later computations, so
+                # remove it here.
+                del G.aux_labels
+                # CAUTION: The following line is crucial.
+                # Arcs entering the back-off state have label equal to #0.
+                # We have to change it to 0 here.
+                G.labels[G.labels >= first_word_disambig_id] = 0
+                # See https://github.com/k2-fsa/k2/issues/874
+                # for why we need to set G.properties to None
+                G.__dict__["_properties"] = None
+                G = k2.Fsa.from_fsas([G]).to(device)
+                G = k2.arc_sort(G)
+                # Save a dummy value so that it can be loaded in C++.
+                # See https://github.com/pytorch/pytorch/issues/67902
+                # for why we need to do this.
+                G.dummy = 1
+
+                torch.save(G.as_dict(), params.lm_dir / "G_4_gram.pt")
+        else:
+            logging.info("Loading pre-compiled G_4_gram.pt")
+            d = torch.load(params.lm_dir / "G_4_gram.pt", map_location=device)
+            G = k2.Fsa.from_dict(d)
+        
+        # Add epsilon self-loops to G as we will compose
+        # it with the whole lattice later
+        
+        #G = k2.add_epsilon_self_loops(G)
+        #G = k2.arc_sort(G)
+        #G = G.to(device)
+
+        # G.lm_scores is used to replace HLG.lm_scores during
+        # LM rescoring.
+        G.lm_scores = G.scores.clone()
+    else:
+        G = None
+
     for set, dl in zip(test_sets, test_dl):
-        hyps, refs = decode_dataset(
+        lm_scales = decode_dataset(
             dl=dl,
             params=params,
             model=model,
             graph_compiler=graph_compiler,
+            graph=HLG,
+            G=G,
         )
     
         decode_dir = params.exp_dir / "decode"
         decode_dir.mkdir(parents=True, exist_ok=True)
-        with open(decode_dir / f"hyps_chkpt{params.iter}_avg{params.avg}_{set}_{params.suffix}.stm", "w") as f:
-            for l in hyps:
-                print(f"{l['session_id']} 1 {l['speaker']} {l['start_time']} {l['end_time']} {l['words']}", file=f)
-        
-        with open(decode_dir / f"refs_chkpt{params.iter}_avg{params.avg}_{set}_{params.suffix}.stm", "w") as f:
-            for l in refs:
-                print(f"{l['session_id']} 1 {l['speaker']} {l['start_time']} {l['end_time']} {l['words']}", file=f)
+        for lm_scale in lm_scales:
+            hyps = lm_scales[lm_scale]['hyps']
+            refs = lm_scales[lm_scale]['refs']
+            with open(decode_dir / f"hyps_chkpt{params.iter}_avg{params.avg}_{lm_scale}_{set}_{params.suffix}.stm", "w") as f:
+                for l in hyps:
+                    print(f"{l['session_id']} 1 {l['speaker']} {l['start_time']} {l['end_time']} {l['words']}", file=f)
+            
+            with open(decode_dir / f"refs_chkpt{params.iter}_avg{params.avg}_{lm_scale}_{set}_{params.suffix}.stm", "w") as f:
+                for l in refs:
+                    print(f"{l['session_id']} 1 {l['speaker']} {l['start_time']} {l['end_time']} {l['words']}", file=f)
 
     logging.info("Done!")
 

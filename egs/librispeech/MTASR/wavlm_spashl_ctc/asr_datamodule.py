@@ -24,8 +24,9 @@ from lhotse.dataset import (
     PrecomputedFeatures,
     SpecAugment,
 )
-from dataset import K2MultiTalkerSpeechRecognitionDataset 
-from lhotse.dataset.sampling.cut_splice import CutSpliceIterable
+from dataset import K2MultiTalkerSpeechRecognitionDataset
+from mix_to_mono_dataset import K2MixToMonoDataset
+from lhotse.dataset.sampling.cut_splice3 import CutSpliceIterable
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -71,41 +72,6 @@ class LibriSpeechAsrDataModule:
             "augmentations, etc.",
         )
         group.add_argument(
-            "--manifest-dir",
-            type=Path,
-            default=Path("data/manifests"),
-            help="Path to directory with train/valid/test cuts.",
-        )
-        group.add_argument(
-            "--enable-musan",
-            type=str2bool,
-            default=True,
-            help="When enabled, select noise from MUSAN and mix it "
-            "with training dataset. ",
-        )
-        group.add_argument(
-            "--concatenate-cuts",
-            type=str2bool,
-            default=False,
-            help="When enabled, utterances (cuts) will be concatenated "
-            "to minimize the amount of padding.",
-        )
-        group.add_argument(
-            "--duration-factor",
-            type=float,
-            default=1.0,
-            help="Determines the maximum duration of a concatenated cut "
-            "relative to the duration of the longest cut in a batch.",
-        )
-        group.add_argument(
-            "--gap",
-            type=float,
-            default=1.0,
-            help="The amount of padding (in seconds) inserted between "
-            "concatenated cuts. This padding is filled with noise when "
-            "noise augmentation is used.",
-        )
-        group.add_argument(
             "--max-duration",
             type=int,
             default=100.0,
@@ -120,40 +86,82 @@ class LibriSpeechAsrDataModule:
             "(you might want to increase it for larger datasets).",
         )
         group.add_argument(
-            "--shuffle",
-            type=str2bool,
-            default=True,
-            help="When enabled (=default), the examples will be "
-            "shuffled for each epoch.",
-        )
-
-        group.add_argument(
             "--num-workers",
             type=int,
-            default=0,
+            default=5,
             help="The number of training dataloader workers that "
             "collect the batches.",
         )
         group.add_argument(
-            "--enable-spec-aug",
-            type=str2bool,
-            default=True,
-            help="When enabled, use SpecAugment for training dataset.",
-        )
-        group.add_argument(
-            "--spec-aug-time-warp-factor",
-            type=int,
-            default=80,
-            help="Used only when --enable-spec-aug is True. "
-            "It specifies the factor for time warping in SpecAugment. "
-            "Larger values mean more warping. "
-            "A value less than 1 means to disable time warp.",
-        )
-        group.add_argument(
-            "--normalize-volume",
+            "--normalize-loudness",
             type=str2bool,
             default=False,
-            help="Normalize the volume of each cutsplice segment",
+            help="Normalize the loudness of each cutsplice segment",
+        )
+        group.add_argument(
+            "--max-splice-duration",
+            type=float,
+            default=30,
+        )
+        group.add_argument(
+            "--max-splices",
+            type=int,
+            default=4,
+        )
+        group.add_argument(
+            "--min-splices",
+            type=int,
+            default=2,
+        )
+        group.add_argument(
+            "--max-unique",
+            type=int,
+            default=3,
+        )
+        group.add_argument(
+            "--max-num-overlaps",
+            type=int,
+            default=3,
+        )
+        group.add_argument(
+            "--overlap",
+            type=float,
+            default=0.6,
+        )
+        group.add_argument(
+            "--min-overlap",
+            type=float,
+            default=0.5,
+        )
+        group.add_argument(
+            "--drift",
+            type=float,
+            default=1.0,
+        )
+        group.add_argument(
+            "--reverb",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
+            "--max-snr",
+            type=float,
+            default=30.0,
+        )
+        group.add_argument(
+            "--splice-schedule-increment",
+            type=float,
+            default=4e-05,
+        )
+        group.add_argument(
+            "--duration-increment",
+            type=float,
+            default=1e-03,
+        )
+        group.add_argument(
+            "--allow-self-overlap",
+            type=str2bool,
+            default=False,
         )
 
     def train_dataloaders(
@@ -173,6 +181,7 @@ class LibriSpeechAsrDataModule:
         train = K2MultiTalkerSpeechRecognitionDataset(
             cut_transforms=[],
             input_transforms=input_transforms,
+            sort_strategy=self.args.sort_strategy,
         )
 
         logging.info("Using DynamicBucketingSampler.")
@@ -184,6 +193,10 @@ class LibriSpeechAsrDataModule:
             drop_last=True,
             quadratic_duration=20,
         )
+            #buffer_size=100,
+            #num_cuts_for_bins_estimate=100,
+            #duration_bins=list(range(10, 60, 2)),
+
         logging.info("About to create train dataloader")
         
         if sampler_state_dict is not None:
@@ -210,6 +223,7 @@ class LibriSpeechAsrDataModule:
         validate = K2MultiTalkerSpeechRecognitionDataset(
             return_cuts = self.args.return_cuts,
             cut_transforms=[],
+            sort_strategy=self.args.sort_strategy,
         )
         
         valid_sampler = DynamicBucketingSampler(
@@ -231,7 +245,8 @@ class LibriSpeechAsrDataModule:
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
         logging.debug("About to create test dataset")
         test = K2MultiTalkerSpeechRecognitionDataset(
-            return_cuts=self.args.return_cuts
+            return_cuts=self.args.return_cuts,
+            sort_strategy=self.args.sort_strategy,
         )
         sampler = DynamicBucketingSampler(
             cuts, max_duration=self.args.max_duration, shuffle=False
@@ -245,10 +260,27 @@ class LibriSpeechAsrDataModule:
         )
         return test_dl
 
+    def mix_to_mono_dataloader(self, cuts: CutSet) -> DataLoader:
+        logging.info("About to create mix_to_mono dataloader")
+        test = K2MixToMonoDataset(
+            return_cuts=self.args.return_cuts,
+            sort_strategy=self.args.sort_strategy,
+        )
+        sampler = DynamicBucketingSampler(
+            cuts, max_duration=self.args.max_duration, shuffle=False
+        )
+        test_dl = DataLoader(
+            test,
+            batch_size=None,
+            sampler=sampler,
+            num_workers=self.args.num_workers,
+        )
+        return test_dl
+
+
     @lru_cache()
     def train_cuts(self) -> CutSet:
         logging.info("About to get train cuts")
-        path = "/ocean/projects/cis210027p/scornell/mdctc/icefall/egs/librispeech/MTASR/manifests/sim-librispeech-train-cutset.jsonl.gz"
         speakers = list(Path("data/manifests/librispeech_speakers").rglob("*.jsonl.gz"))
         num_spks = len(speakers) 
         weight = 1/num_spks
@@ -263,45 +295,82 @@ class LibriSpeechAsrDataModule:
             weights.append(w)
             names.append(n)
 
-        #cut_info.append(("sim", sim_weight, path))
-        #cutsets.append(load_manifest_lazy(path))
-        #weights.append(sim_weight)
-        #names.append("sim")
-        #recordings = list(Path(path).rglob("*train*.jsonl.gz"))
-        #num_recos = len(recordings)
-        #weight = 1/num_recos
-        #cut_info = []
-        #for s in recordings:
-        #    cut_info.append((s.stem.split("_")[-1].split(".")[0], weight, s))
-        #
-        #cutsets, weights, names = [], [], []
-        #for n, w, p in cut_info: 
-        #    cutsets.append(load_manifest_lazy(p))
-        #    weights.append(w)
-        #    names.append(n)
-
+        #cs_iter = CutSpliceIterable(
+        #    cutsets,
+        #    cutset_weights=weights,
+        #    cutset_prefixes=names,
+        #    max_duration=20,
+        #    final_max_duration=self.args.max_splice_duration,
+        #    max_duration_increment=1e-03,
+        #    max_num_overlaps=3,
+        #    max_splices=1,
+        #    min_splices=1,
+        #    final_max_splices=self.args.max_splices,
+        #    final_min_splices=1,
+        #    max_splices_schedule_increment=4e-05,
+        #    min_splices_schedule_increment=4e-05,
+        #    max_unique=self.args.max_unique,
+        #    min_unique=self.args.max_unique,
+        #    max_overlap=[0.95]*num_spks,
+        #    min_overlap=[0.0]*num_spks,
+        #    max_snr=[60 * (random.random() - 0.5) for i in range(num_spks)],
+        #    normalize_loudness=False,
+        #    serialize='none',
+        #    sampling_rate=16000,
+        #)
+        
         cs_iter = CutSpliceIterable(
             cutsets,
             cutset_weights=weights,
             cutset_prefixes=names,
             max_duration=20,
-            final_max_duration=30,
-            max_duration_increment=1e-03,
-            max_num_overlaps=2,
-            max_splices=2,
-            min_splices=2,
-            final_max_splices=3,
-            final_min_splices=2,
-            max_splices_schedule_increment=8e-05,
-            min_splices_schedule_increment=8e-05,
-            max_unique=10,
-            max_overlap=[0.95]*num_spks,
-            min_overlap=[0.5]*num_spks,
-            max_snr=[60 * (random.random() - 0.5) for i in range(num_spks)],
-            normalize_loudness=False,
-            serialize='none',
+            final_max_duration=self.args.max_splice_duration,
+            max_duration_increment=self.args.duration_increment,
+            max_num_overlaps=self.args.max_num_overlaps,
+            max_splices=1,
+            min_splices=1,
+            final_max_splices=self.args.max_splices,
+            final_min_splices=self.args.min_splices,
+            max_splices_schedule_increment=self.args.splice_schedule_increment,
+            min_splices_schedule_increment=self.args.splice_schedule_increment,
+            max_unique=self.args.max_unique,
+            min_unique=self.args.max_unique,
+            max_snr=[2*self.args.max_snr * (random.random() - 0.5) for i in range(num_spks)],
+            normalize_loudness=self.args.normalize_loudness,
+            reverb=self.args.reverb,
             sampling_rate=16000,
+            drift=self.args.drift,
+            overlap=self.args.overlap,
+            min_overlap=self.args.min_overlap,
+            self_overlap=self.args.allow_self_overlap,
         )
+
+        #cs_iter = CutSpliceIterable(
+        #    cutsets,
+        #    cutset_weights=weights,
+        #    cutset_prefixes=names,
+        #    max_duration=30,
+        #    final_max_duration=30,
+        #    max_duration_increment=1e-03,
+        #    max_num_overlaps=3,
+        #    max_splices=2,
+        #    min_splices=2,
+        #    final_max_splices=4,
+        #    final_min_splices=4,
+        #    max_splices_schedule_increment=4e-05,
+        #    min_splices_schedule_increment=4e-05,
+        #    max_unique=3,
+        #    min_unique=3,
+        #    max_overlap=[0.95]*num_spks,
+        #    min_overlap=[0.5]*num_spks,
+        #    max_snr=[60 * (random.random() - 0.5) for i in range(num_spks)],
+        #    normalize_loudness=False,
+        #    serialize='none',
+        #    sampling_rate=16000,
+        #)
+        
+        
+        
         return CutSet(cs_iter)
 
     @lru_cache()
@@ -320,27 +389,60 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def libri2mix_dev_clean_cuts(self) -> CutSet:
         cuts = load_manifest_lazy("./data/manifests/libri2mix_mix_clean_sc_dev_cutset.jsonl.gz")
+        if self.args.normalize_loudness:
+            return cuts.normalize_loudness(-23)
         return cuts
 
     @lru_cache()
     def libri2mix_test_clean_cuts(self) -> CutSet:
         cuts = load_manifest_lazy("./data/manifests/libri2mix_mix_clean_sc_test_cutset.jsonl.gz")
+        if self.args.normalize_loudness:
+            return cuts.normalize_loudness(-23)
         return cuts
 
     @lru_cache()
     def libri2mix_test_both_cuts(self) -> CutSet:
         cuts = load_manifest_lazy("./data/manifests/libri2mix_mix_both_sc_test_cutset.jsonl.gz")
+        if self.args.normalize_loudness:
+            return cuts.normalize_loudness(-23)
         return cuts
 
     @lru_cache()
     def libri3mix_test_clean_cuts(self) -> CutSet:
         cuts = load_manifest_lazy("./data/manifests/libri3mix_mix_clean_sc_test_cutset.jsonl.gz")
+        if self.args.normalize_loudness:
+            return cuts.normalize_loudness(-23)
         return cuts
 
+    @lru_cache()
+    def librispeechmix_2_cuts(self) -> CutSet:
+        cuts = load_manifest_lazy("./data/manifests/cuts_librispeechmix_test-clean-2mix.jsonl.gz")
+        if self.args.normalize_loudness:
+            return cuts.normalize_loudness(-23)
+        return cuts
 
     @lru_cache()
-    def valid_cuts(self) -> CutSet:
+    def librispeechmix_3_cuts(self) -> CutSet:
+        cuts = load_manifest_lazy("./data/manifests/cuts_librispeechmix_test-clean-3mix.jsonl.gz")
+        if self.args.normalize_loudness:
+            return cuts.normalize_loudness(-23)
+        return cuts
+
+    @lru_cache()
+    def valid_cuts(self, no_overlap=False) -> CutSet:
         logging.info("About to get dev cuts")
+        if no_overlap:
+            cuts = load_manifest_lazy("./data/manifests/cuts_librispeech_dev-clean.jsonl.gz")
+            cuts_ = []
+            total = 0
+            for c in cuts:
+                if total > 2*3600:
+                    break
+                cuts_.append(c)
+                total += c.duration
+            return CutSet(cuts_)
+
+        return load_manifest_lazy("data/manifests/cuts_librispeech_dev_synth.jsonl.gz")        
         cut_info = [
             ('dev-clean', 0.5, "./data/manifests/cuts_librispeech_dev-clean.jsonl.gz"),
             ('dev-other', 0.5, "./data/manifests/cuts_librispeech_dev-other.jsonl.gz"),
@@ -358,13 +460,10 @@ class LibriSpeechAsrDataModule:
             max_duration=30,
             max_splices=2,
             min_splices=2,
-            max_overlap=[0.95, 0.95],
-            min_overlap=[0.8, 0.8],
             max_snr=[0, 0],
             final_max_splices=2,
             max_unique=2,
             normalize_loudness=False,
-            serialize='none',
             sampling_rate=16000,
         )
         
@@ -428,8 +527,20 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def synth_cuts(self) -> CutSet:
         logging.info("About to get snythetic cuts")
-        return load_manifest_lazy("data/manifests/cuts_librispeech_dev_synth.jsonl.gz")        
+        cuts = load_manifest_lazy("data/manifests/cuts_librispeech_dev_synth.jsonl.gz")
+        if self.args.normalize_loudness:
+            return cuts.normalize_loudness(-23)
+        return cuts
 
+    @lru_cache()
+    def synth2_cuts(self, i) -> CutSet:
+        logging.info("About to get snythetic cuts")
+        cuts = load_manifest_lazy(f"data/manifests2/cuts_librispeech_dev_synth_{i}spk_8splices.jsonl.gz")
+        if self.args.normalize_loudness:
+            return cuts.normalize_loudness(-23)
+        return cuts
+
+    
     @lru_cache()
     def aed_cuts(self) -> CutSet:
         logging.info("About to get audioset cuts")
@@ -438,8 +549,12 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def ami_dev(self) -> CutSet:
         logging.info("About to get ami dev cuts")
-        return load_manifest_lazy("data/manifests/cuts_ami_dev_pause0.5.jsonl.gz")
-   
+        cuts = load_manifest_lazy("data/manifests/cuts_ami_dev_pause0.5.jsonl.gz")
+        #cuts = cuts.filter(lambda c: c.duration <= 40)
+        #if self.args.normalize_loudness:
+        #    return cuts.normalize_loudness(-23)
+        return cuts
+
     @lru_cache()
     def ami_test(self) -> CutSet:
         logging.info("About to get ami test cuts")

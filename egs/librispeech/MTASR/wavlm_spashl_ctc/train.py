@@ -172,7 +172,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--base-lr", type=float, default=0.05, help="The base learning rate."
+        "--base-lr", type=float, default=0.0001, help="The base learning rate."
     )
 
     parser.add_argument(
@@ -280,7 +280,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--total-steps", type=int, default=200000, help="The total number of "
+        "--total-steps", type=int, default=100000, help="The total number of "
         "steps for the lr_scheduler",
     )    
     
@@ -295,11 +295,23 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--max-overlap",
+        type=int,
+        default=3,
+    )
+
+    parser.add_argument(
+        "--total-max-overlaps",
+        type=int,
+        default=3600,
+    )
+
+    parser.add_argument(
         "--use-hat",
         type=str2bool,
         default=False,
     )
-   
+
     parser.add_argument(
         "--use-layer-norm",
         type=str2bool,
@@ -311,7 +323,53 @@ def get_parser():
         type=str2bool,
         default=False,
     )
-    
+
+    parser.add_argument(
+        "--downsample",
+        type=str2bool,
+        default=True,
+    )
+
+    parser.add_argument(
+        "--beam-size",
+        type=int,
+        default=24,
+    )
+
+    parser.add_argument(
+        "--max-states",
+        type=int,
+        default=25000000,
+    )
+
+    parser.add_argument(
+        "--original-topo",
+        type=str2bool,
+        default=False
+    )
+
+    parser.add_argument(
+        "--sort-strategy",
+        type=str,
+        default="start_time",
+    )
+
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=100,
+    )
+
+    parser.add_argument(
+        "--speaker-weight",
+        type=float,
+        default=1.0,
+    )
+
+    parser.add_argument(
+        "--no-overlap",
+        type=bool, default=False,
+    )
     return parser
 
 
@@ -376,24 +434,21 @@ def get_params() -> AttributeDict:
     """
     params = AttributeDict(
         {
-            "frame_shift_ms": 10.0,
-            "allowed_excess_duration_ratio": 0.1,
             "best_train_loss": float("inf"),
             "best_valid_loss": float("inf"),
             "best_train_epoch": -1,
             "best_valid_epoch": -1,
             "batch_idx_train": 0,
-            "log_interval": 100,
-            "decode_hyp_interval": 200,
+            #"log_interval": 100, #100,
+            "decode_hyp_interval": 100, #100,
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
-            "feature_dim": 80,
-            "subsampling_factor": 4,  # not passed in, this is fixed.
+            #"subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
             # parameters for loss
-            "beam_size": 24,
+            #"beam_size": 24,
             "reduction": "sum",
             "use_double_scores": True,
             # parameters for decoding
@@ -431,6 +486,7 @@ def get_mdctc_model(
         vocab_size2=params.max_num_spks,
         hat=params.use_hat,
         layer_norm=params.use_layer_norm,
+        downsample=params.downsample,
     )
     
     return model
@@ -633,8 +689,10 @@ def compute_loss(
     beam_factor = 1
     with torch.set_grad_enabled(is_training):
         start = time.time()
-        ctc_output, x_lens = model(feature, feature_lens)
-        ctc_output -= 1e-09
+        ctc_output, x_lens = model(
+            feature, feature_lens,
+            speaker_weight = params.speaker_weight
+        )
         end_nnet = time.time()
         subsampling_factor = params.subsampling_factor
         beam_size = params.beam_size * beam_factor
@@ -687,7 +745,7 @@ def compute_loss(
                 logging.info(f"")
             logging.info("--------------------------------------")
         
-        # Decoding with WFST supervisions
+        # Train with WFST supervisions
         sequence_idx = torch.arange(
             0, x_lens.size(0),
         ).unsqueeze(0).t().to(torch.int32)
@@ -697,8 +755,6 @@ def compute_loss(
         ).unsqueeze(0).t()
 
         num_frames = x_lens.unsqueeze(1).to(torch.int32).cpu()
-        #num_frames = (x_lens * 2).unsqueeze(1).to(torch.int32).cpu()
-        #num_frames = x_lens.unsqueeze(1).to(torch.int32).cpu()
 
         supervision_segments = torch.cat(
             [sequence_idx, start_frame, num_frames],
@@ -712,22 +768,12 @@ def compute_loss(
         collar = params.collar
         decoding_graphs = graph_compiler.compile(
             texts, start_frames, num_frames_init, speakers,
-            collar=collar, dynamic_collar=True, max_overlaps=3600,
+            collar=collar,
+            max_overlaps=params.total_max_overlaps,
+            original_topo=params.original_topo,
+            allow_self_overlap=params.allow_self_overlap,
         )
-        num_arcs = decoding_graphs.labels.size(0) / len(texts)
-        logging.info(f"Num arcs: {num_arcs}")
-        logging.info(f"Max Spk density: {max_density}")
-        logging.info(f"Length: {feature_lens[0].item()}")
-        #while num_arcs > params.max_avg_arcs:
-        #    collar = collar // 2 
-        #    logging.warning(f"Too many arcs. Halving collar: {collar}")
-        #    decoding_graphs = graph_compiler.compile(
-        #        texts, start_frames, num_frames_init, speakers,
-        #        collar=collar
-        #    )
-        #    num_arcs = decoding_graphs.labels.size(0)
-        #    logging.info(f"Num arcs: {num_arcs}")
-
+        
         decoding_graphs = decoding_graphs.to(device)
         
         end_sup = time.time()
@@ -742,42 +788,23 @@ def compute_loss(
             a_fsas=decoding_graphs,
             b_fsas=dense_fsa_vec,
             output_beam=beam_size,
-            max_states=25000000,
+            max_states=params.max_states, #25000000,
             frame_idx_name=None,
         )
-       
-        #import pdb; pdb.set_trace() 
-        #empty_idxs = []
-        #for i in range(lattice.shape[0]):
-        #    if lattice[i].labels.size(0) == 0:
-        #        empty_idxs.append(i)
-        #lattice = k2.intersect_dense_pruned(
-        #    decoding_graphs,
-        #    dense_fsa_vec,
-        #    search_beam=15.0,
-        #    output_beam=beam_size,
-        #    min_active_states=30,
-        #    max_active_states=50000, 
-        #)
        
         tot_scores = lattice.get_tot_scores(
             log_semiring=True,
             use_double_scores=use_double_scores
         )
         loss = -1 * tot_scores
-        loss = loss[~torch.isinf(loss)]
+        inf_mask = torch.isinf(loss)
+        loss = torch.where(inf_mask, torch.zeros_like(loss), loss)
+        # TODO: Really need to figure out what is happening here
         if torch.any(loss < 0):
             logging.info("Negative loss. Clamping") 
             loss = torch.clamp(loss, min=0.0)
         loss = loss.to(torch.float32) 
         ctc_loss = loss.sum() 
-        #ctc_loss = k2.ctc_loss(
-        #    decoding_graph=decoding_graphs,
-        #    dense_fsa_vec=dense_fsa_vec,
-        #    output_beam=beam_size,
-        #    reduction=reduction,
-        #    use_double_scores=use_double_scores,
-        #)
         end_ctc = time.time()
         
     nnet_time = end_nnet - start
@@ -791,9 +818,10 @@ def compute_loss(
     info["beam_size"] = beam_size * tot_frames 
     info["max_length"] = num_frames.max() * tot_frames
     info["max_duration"] = num_frames.max() * 0.01 * params.subsampling_factor * tot_frames
+    info["max_spk_density"] = max_density * tot_frames
     avg_num_texts = sum([len(t) for t in texts])/len(texts)
     info["num_texts"] = avg_num_texts * tot_frames
-    info["spk_density"] = (sum(densities) / len(densities)) * tot_frames
+    info["avg_spk_density"] = (sum(densities) / len(densities)) * tot_frames
     info["arc_density"] = decoding_graphs.arcs.values().size(0)
     info["pct_ctc"] = ctc_time / total_time * tot_frames
     info["pct_nnet"] = nnet_time / total_time * tot_frames
@@ -896,6 +924,7 @@ def train_one_epoch(
     start = time.time()
     num_egs = 0
     num_frames = 0 
+    
     for batch_idx, batch in enumerate(train_dl):
         params.batch_idx_train += 1
         batch_size = batch["num_frames"].size(0)
@@ -908,7 +937,6 @@ def train_one_epoch(
                 param_group['lr'] = init_lr
 
         try:
-            #with torch.cuda.amp.autocast(enabled=params.use_fp16):
             with torch.amp.autocast(**autocast_args):
                 loss, loss_info = compute_loss(
                     params=params,
@@ -978,7 +1006,7 @@ def train_one_epoch(
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
             # of the grad scaler is configurable, but we can't configure it to have different
             # behavior depending on the current grad scale.
-            cur_grad_scale = scaler._scale.item()
+            cur_grad_scale = scaler.get_scale()
             if cur_grad_scale < 1.0 or (cur_grad_scale < 8.0 and batch_idx % 400 == 0):
                 scaler.update(cur_grad_scale * 2.0)
             if cur_grad_scale < 0.01:
@@ -988,14 +1016,14 @@ def train_one_epoch(
 
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr()) if not is_frozen else params.freeze_lr
-            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
+            cur_grad_scale = scaler.get_scale() if params.use_fp16 else 1.0
 
             logging.info(
                 f"Epoch {params.cur_epoch}, "
                 f"batch {batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
-                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
+                + (f"grad_scale: {scaler.get_scale()}" if params.use_fp16 else "")
             )
 
             if tb_writer is not None:
@@ -1081,7 +1109,7 @@ def run(rank, world_size, args):
     )
 
     params.vocab_size = graph_compiler.sp.vocab_size()
-    
+    params.subsampling_factor = 4 if params.downsample else 2
     logging.info("About to create model")
 
     model = get_mdctc_model(params)
@@ -1187,8 +1215,12 @@ def run(rank, world_size, args):
         # You should use ../local/display_manifest_statistics.py to get
         # an utterance duration distribution for your dataset to select
         # the threshold
+        overlaps = [len(c.supervisions) for c in c.cut_into_windows(0.1)]
+        max_overlap = max(overlaps)
+        num_ge_max = len([o for o in overlaps if o >= params.max_overlap])
         return (
-            1.0 <= c.duration <= 62.0 and len(CutSet([c]).speakers) <= params.max_num_spks
+            1.0 <= c.duration <= 60.0 and len(CutSet([c]).speakers) <= params.max_num_spks
+            and num_ge_max <= 10 and max_overlap <= params.max_overlap 
             #and sum(len(s.text) for s in c.supervisions) <= 400
         )
 
@@ -1197,8 +1229,8 @@ def run(rank, world_size, args):
     train_dl = librispeech.train_dataloaders(
         train_cuts, sampler_state_dict=sampler_state_dict
     )
-    
-    valid_cuts = librispeech.valid_cuts()
+   
+    valid_cuts = librispeech.valid_cuts(params.no_overlap)
     valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 

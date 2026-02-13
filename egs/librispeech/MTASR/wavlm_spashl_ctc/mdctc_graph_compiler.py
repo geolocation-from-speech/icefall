@@ -19,7 +19,6 @@ from itertools import groupby
 import logging
 
 
-# For now, this only works on CPU as far as I can tell
 class MDCTCGraphCompiler(object):
     """
     A graph compiler for multi-dimensional CTC decoding with token-level timing constraints.
@@ -64,7 +63,7 @@ class MDCTCGraphCompiler(object):
         self.sp = sp
 
 
-    def build_ctc_topo(self, symbols: List[int]) -> k2.Fsa:
+    def build_ctc_topo(self, symbols: List[int], original=False) -> k2.Fsa:
         """
             Builds a CTC topology over the provided symbols only.
 
@@ -74,6 +73,7 @@ class MDCTCGraphCompiler(object):
         """
         assert 0 not in symbols, "Symbol 0 is reserved for the blank token in CTC."
         
+        symbols = list(set(symbols))
         arcs = []
         blank_state = 0  # Will set this properly later
         arcs.append(f"{blank_state} {blank_state} 0 0 0.0")  # self-loop with blank
@@ -85,12 +85,13 @@ class MDCTCGraphCompiler(object):
             arcs.append(f"{blank_state} {i} {s1} {s1} 0.0")    # to symbol state
         
             # only self-loop and go to blank
-            #arcs.append(f"{i} {i} {s1} 0 0.0")     # self-loop with symbol
             arcs.append(f"{i} 0 0 0 0.0")  # to blank
-            #for j, s2 in enumerate(symbols, 1):
-            #    if i == j:
-            #        continue
-            #    arcs.append(f"{i} {j} {s2} {s2} 0.0")
+            if original:
+                arcs.append(f"{i} {i} {s1} 0 0.0")     # self-loop with symbol
+                for j, s2 in enumerate(symbols, 1):
+                    if i == j:
+                        continue
+                    arcs.append(f"{i} {j} {s2} {s2} 0.0")
             arcs.append(f"{i} {len(symbols)+1} -1 -1 0.0")
         arcs = sorted(arcs, key=lambda x: int(x.split()[0]))
         arcs.append(f"{len(symbols)+1}")
@@ -108,6 +109,7 @@ class MDCTCGraphCompiler(object):
         spks: List[int],
         spk2int: Dict,
         collar=64000,
+        allow_self_overlap: bool = True,
     ) -> Tuple[List[List[str]], List[Tuple[str, str]], Dict[str, int]]:
         """
             Generate a list of token-level labels and precedence constraints for a sequence.
@@ -165,6 +167,8 @@ class MDCTCGraphCompiler(object):
                 # hard constraints for different utterances by the same speaker
                 # or utterances that are far away
                 far_enough = abs(diff) > collar # or ki[1] == kj[1] 
+                if not allow_self_overlap:
+                    far_enough = far_enough or (ki[1] == kj[1])
                 if far_enough:
                     num_constraints += 1
                 else:
@@ -173,9 +177,85 @@ class MDCTCGraphCompiler(object):
                     constraints.append((ki, kj))
                 elif far_enough:
                     constraints.append((kj, ki))
-        #print(f"num_constraints: {num_constraints}")
         return seqs, constraints, num_ovlps, pos_sym_to_sym
 
+    def get_seqs_and_constraints_no_spk(
+        self,
+        c: List[str],
+        offsets: List[int],
+        lens: List[int],
+        collar=64000,
+        allow_self_overlap: bool = False,
+    ) -> Tuple[List[List[str]], List[Tuple[str, str]], Dict[str, int]]:
+        """
+            Generate a list of token-level labels and precedence constraints for a sequence.
+    
+            This method tokenizes each string in `c` using the SentencePiece model,
+            associates each token with an estimated start time based on `offsets` and `lens`,
+            and returns structured data useful for constructing topologically sorted FSAs
+            with timing-aware constraints.
+    
+            Each token is annotated with a position-specific label (e.g., `'532_0_1'`), where
+            `532` is the token ID, `0` is the string index, and `1` is the token index within the string.
+            Constraints are created between tokens across sequences based on their relative start times.
+    
+            :param c: A list of strings (e.g., words or phrases) to be tokenized.
+            :type c: List[str]
+            :param offsets: Start time for each string in `c`, typically in frames or milliseconds.
+            :type offsets: List[int]
+            :param lens: Duration (in time units) of each string in `c`.
+            :type lens: List[int]
+    
+            :returns: A tuple containing:
+                - seqs (List[List[str]]): Token labels for each input string, with unique positional suffixes.
+                - constraints (List[Tuple[str, str]]): List of precedence constraints between tokens.
+                - sym_map (Dict[str, int]): Mapping from positional token labels to original SentencePiece token IDs.
+            :rtype: Tuple[List[List[str]], List[Tuple[str, str]], Dict[str, int]
+        """        
+        constraints = []
+        # Find the total len of the sequence
+        length = max([o + l for o, l in zip(offsets, lens)])
+
+        # Convert token index to time index (i.e., in terms of frame offsets)
+        token_start_times = {}
+        pos_sym_to_sym = {}
+        seqs = []
+        for i, (s, o, l) in enumerate(zip(self.sp.encode(c), offsets, lens)):
+            if len(s) == 0:
+                continue
+            samples_per_token  = l // len(s) + 1
+            labels = []
+            for j, token in enumerate(s):
+                pos_sym = (token, j, i)
+                pos_sym_to_sym[pos_sym] = token
+                token_start_times[pos_sym] = o + j*samples_per_token
+                labels.append(pos_sym)
+            seqs.append(labels)
+       
+        num_constraints = 0
+        num_ovlps = 0  
+        for ki in token_start_times:
+            for kj in token_start_times:
+                # Only consider cross sequence comparisons
+                if ki[2] == kj[2]:
+                    continue
+                diff = token_start_times[ki] - token_start_times[kj]
+                # hard constraints for different utterances by the same speaker
+                # or utterances that are far away
+                far_enough = abs(diff) > collar # or ki[1] == kj[1] 
+                if not allow_self_overlap:
+                    far_enough = far_enough or (ki[1] == kj[1])
+                if far_enough:
+                    num_constraints += 1
+                else:
+                    num_ovlps += 1
+                if far_enough and diff < 0:
+                    constraints.append((ki, kj))
+                elif far_enough:
+                    constraints.append((kj, ki))
+        return seqs, constraints, num_ovlps, pos_sym_to_sym
+
+    
     def compile(
         self,
         cuts: List[List[str]],
@@ -183,8 +263,9 @@ class MDCTCGraphCompiler(object):
         lens,
         spks,
         collar: int = 64000,
-        dynamic_collar: bool = False, 
         max_overlaps: int = 6000, 
+        original_topo: bool = False,
+        allow_self_overlap: bool = False,
         debug: bool = False,
     ) -> k2.Fsa:
         """
@@ -202,34 +283,43 @@ class MDCTCGraphCompiler(object):
             :param lens: A batch of lengths (e.g., in frames or tokens) for each token in each transcript.
             :type lens: List[List[int]] or compatible structure
             :param spks: A batch of lists of speaker labels
-            :param dynamic_collar: Flag that says whether to dynamically estimate
-                the resulting graph size from the length and the amount of overlap
-                to keep the graph a manageable size
-            :type dynamic_collar: bool
             :param debug: Flag for debugging outputs
             :type debug: bool
             :param max_overlaps: the maximum number of overlapping tokens allowed
-            :type max_overlaps: int 
+            :type max_overlaps: int
+            :param original_topo: Which ctc topology to use
+            :type original_topo: bool
+            :param allow_self_overlap: multiple utterances by the same speaker
+                can overlap
+            :type allow_self_overlap: bool
             :return: A batched FSA (`FsaVec`) representing all input transcripts composed with a CTC topology.
             :rtype: k2.Fsa
         """
         graphs = []
         for c, o, l, spk in zip(cuts, offsets, lens, spks):
+            # This line is critical. The supervisions are ordered in some
+            # specified way, in the list spk. There may be duplicate elements
+            # in the list. dict.fromkeys() preserves the ordering and removes
+            # duplicates. This feature was introduced in python 3.7.
             spk2int = {k: i for i, k in enumerate(dict.fromkeys(spk))}
             # Estimate
             num_ovlps = max_overlaps + 1
             collar_ = collar
             seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints(
-                c, o, l, spk, spk2int, collar=collar_
+                c, o, l, spk, spk2int,
+                collar=collar_,
+                allow_self_overlap=allow_self_overlap,
             )
             while num_ovlps > max_overlaps: 
                 collar_ = collar_ // 2
                 logging.info(f"Number of overlaps {num_ovlps} is > {max_overlaps}. Halving collar to {collar_}") 
                 seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints(
-                    c, o, l, spk, spk2int, collar=collar_
+                    c, o, l, spk, spk2int,
+                    collar=collar_, allow_self_overlap=allow_self_overlap,
                 )
-            #print(f"ovlps: {num_ovlps}")
-            fsa = self.build_topo_sort_fsa(seqs, constraints)
+            
+            fsa = self.build_topo_sort_fsa(seqs, constraints, aux_labels=True)
+            
             if debug:
                 sym_str = ""
                 for sym, idx in fsa.symbols.items():
@@ -242,7 +332,85 @@ class MDCTCGraphCompiler(object):
                 [
                     i + spk2int[s]*(self.sp.vocab_size()-1)
                     for s, t in zip(spk, c) for i in self.sp.encode(t)
-                ]
+                ],
+                original=original_topo
+            )
+            ctc_topo = ctc_topo.to(self.device)
+            fsa = fsa.to(self.device)
+            fsa_with_self_loop = k2.remove_epsilon_and_add_self_loops(fsa)
+            fsa_with_self_loop = k2.connect(fsa_with_self_loop)
+            fsa_with_self_loop = k2.arc_sort(fsa_with_self_loop)
+            graph = k2.compose(
+                ctc_topo,
+                fsa_with_self_loop,
+                treat_epsilons_specially=False,
+            )
+            graphs.append(graph)
+        training_graphs = k2.create_fsa_vec(graphs)
+        return training_graphs
+
+    def compile_nospk(
+        self,
+        cuts: List[List[str]],
+        offsets,
+        lens,
+        collar: int = 64000,
+        max_overlaps: int = 6000, 
+        original_topo: bool = False,
+        debug: bool = False,
+    ) -> k2.Fsa:
+        """
+            Compile a batch of transcripts into CTC-constrained decoding graphs.
+
+            This function encodes each transcript into subword/token IDs, constructs a
+            constrained alignment FSA based on per-token constraints, and composes it
+            with a CTC topology graph to produce a training graph. The result is a
+            `k2.FsaVec` of decoding graphs suitable for CTC training.
+
+            :param cuts: A batch of transcripts, where each transcript is a list of string tokens.
+            :type cuts: List[List[str]]
+            :param offsets: A batch of starting offsets for each token in each transcript.
+            :type offsets: List[List[int]] or compatible structure
+            :param lens: A batch of lengths (e.g., in frames or tokens) for each token in each transcript.
+            :type lens: List[List[int]] or compatible structure
+            :param debug: Flag for debugging outputs
+            :type debug: bool
+            :param max_overlaps: the maximum number of overlapping tokens allowed
+            :type max_overlaps: int
+            :param original_topo: Which ctc topology to use
+            :type original_topo: bool
+            :return: A batched FSA (`FsaVec`) representing all input transcripts composed with a CTC topology.
+            :rtype: k2.Fsa
+        """
+        graphs = []
+        for c, o, l in zip(cuts, offsets, lens):
+            # Estimate
+            num_ovlps = max_overlaps + 1
+            collar_ = collar
+            seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints_no_spk(
+                c, o, l, collar=collar_
+            )
+            while num_ovlps > max_overlaps: 
+                collar_ = collar_ // 2
+                logging.info(f"Number of overlaps {num_ovlps} is > {max_overlaps}. Halving collar to {collar_}") 
+                seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints_no_spk(
+                    c, o, l, collar=collar_
+                )
+            
+            fsa = self.build_topo_sort_fsa(seqs, constraints, use_speaker=False, aux_labels=True)
+            if debug:
+                sym_str = ""
+                for sym, idx in fsa.symbols.items():
+                    sym_str += f"{sym} {idx}\n"
+
+                # Create k2 SymbolTable from string
+                fsa.labels_sym = k2.SymbolTable.from_str(sym_str)
+                fsa.draw("test_fsa.svg")
+            ctc_topo = self.build_ctc_topo(
+                [
+                    i for t in c for i in self.sp.encode(t)
+                ],
+                original=original_topo
             )
             ctc_topo = ctc_topo.to(self.device)
             fsa = fsa.to(self.device)
@@ -263,6 +431,8 @@ class MDCTCGraphCompiler(object):
         cuts: List[List[str]],
         offsets: List[List[int]],
         lens: List[List[int]],
+        collar: int = 64000,
+        max_overlaps: int = 6000,
         debug: bool = False
     ) -> k2.Fsa:
         """
@@ -286,8 +456,19 @@ class MDCTCGraphCompiler(object):
         """ 
         graphs = []
         for c, o, l in zip(cuts, offsets, lens):
-            seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints(c, o, l)
-            fsa = self.build_topo_sort_fsa(seqs, constraints)
+            num_ovlps = max_overlaps + 1
+            collar_ = collar
+            seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints_no_spk(
+                c, o, l, collar=collar_,
+            )
+            while num_ovlps > max_overlaps: 
+                collar_ = collar_ // 2
+                logging.info(f"Number of overlaps {num_ovlps} is > {max_overlaps}. Halving collar to {collar_}") 
+                seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints_no_spk(
+                    c, o, l, collar=collar_
+                )
+            
+            fsa = self.build_topo_sort_fsa(seqs, constraints, use_speaker=False)
             if debug:
                 sym_str = ""
                 for sym, idx in fsa.symbols.items():
@@ -305,7 +486,9 @@ class MDCTCGraphCompiler(object):
         self,
         sequences: List[Tuple],
         extra_constraints: List[Tuple],
+        use_speaker: bool = True,
         debug: bool = False,
+        aux_labels: bool = False,
     ) -> k2.Fsa:
         """
             Construct a topologically sorted FSA from partially ordered sequences and additional constraints.
@@ -341,12 +524,13 @@ class MDCTCGraphCompiler(object):
         sym2id = {s: i for i, s in enumerate(symbols, 1)}  # k2 requires nonzero symbols
         id2sym = {i: s for s, i in sym2id.items()}
         # (vocabsize-1) Need to handle subtle case regarding not repeating the blank per speaker
-        id2orig_id = {
-            i: s[0] + s[1]*(self.sp.vocab_size()-1)
-            for i, s in id2sym.items()
-        }
-        #origsym2id = {self.sp.decode(id2orig_id[i]): id2orig_id[i] for i in id2sym}
-        #id2origsym = {i: s for s, i in origsym2id.items()}
+        if use_speaker:
+            id2orig_id = {
+                i: s[0] + s[1]*(self.sp.vocab_size()-1)
+                for i, s in id2sym.items()
+            }
+        else:
+            id2orig_id = {i: s[0] for i, s in id2sym.items()} 
 
         N = len(symbols)
         sym2index = {s: i for i, s in enumerate(symbols)}
@@ -405,24 +589,37 @@ class MDCTCGraphCompiler(object):
                         next_state_id += 1
                         queue.append(new_emitted)
                     next_state = state_map[new_emitted]
+                    # The + 1 is because k2 reserves a meaning for 0
+                    aux = index2sym[i][3] + 1 if use_speaker else index2sym[i][2] + 1
                     sym_id = sym2id[index2sym[i]]
                     # transitions: (src_state, dest_state, label, aux_label, score)
-                    transitions.append((curr_state, next_state, sym_id, 0.0))
+                    if aux_labels:
+                        transitions.append((curr_state, next_state, sym_id, aux, 0.0))
+                    else:
+                        transitions.append((curr_state, next_state, sym_id, 0.0))
 
         # Step 4: Build k2 FSA from transitions and final states
         # k2 FSA text format: "src dest label [aux_label] [weight]"
         lines = []
-        for (src, dest, label, weight) in transitions:
-            new_label = id2orig_id[label]
-            lines.append(f"{src} {dest} {new_label} {weight}")
-
-        final_state = next_state_id 
-        for s in final_states: 
-            lines.append(f"{s} {final_state} -1 0.0")
+        if aux_labels:
+            for (src, dest, label, aux, weight) in transitions:
+                new_label = id2orig_id[label]
+                lines.append(f"{src} {dest} {new_label} {aux} {weight}")
+            final_state = next_state_id 
+            for s in final_states: 
+                lines.append(f"{s} {final_state} -1 -1 0.0")
+        else:
+            for (src, dest, label, weight) in transitions:
+                new_label = id2orig_id[label]
+                lines.append(f"{src} {dest} {new_label} {weight}")
+            final_state = next_state_id 
+            for s in final_states: 
+                lines.append(f"{s} {final_state} -1 0.0")
+        
         lines.append(f"{final_state}")
 
         fsa_str = "\n".join(lines)
-        fsa = k2.Fsa.from_str(fsa_str, acceptor=True)
+        fsa = k2.Fsa.from_str(fsa_str, acceptor=(not aux_labels))
         
         if debug:
             # Relabel all of the labels according to the original bpe units

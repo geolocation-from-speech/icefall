@@ -52,7 +52,6 @@ if __name__ == "__main__":
     parser.add_argument("--sups", nargs='+', type=str)
     parser.add_argument("--cuts", type=str)
     parser.add_argument("odir")
-    parser.add_argument("--num-splits", type=int, default=200)
     parser.add_argument("--trim-to-supervisions", action="store_true")
     parser.add_argument("--oname", type=str, default=None)
     parser.add_argument("--skip-shuffle", action="store_true")
