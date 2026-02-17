@@ -59,6 +59,8 @@ from mdctc_graph_compiler import MDCTCGraphCompiler
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
 from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
 from icefall.checkpoint import (
+    find_checkpoints,
+    average_checkpoints,
     save_checkpoint_with_global_batch_idx,
     update_averaged_model,
 )
@@ -355,6 +357,31 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--pretrained-dir",
+        type=str,
+        default=None,
+    )
+    
+    parser.add_argument(
+        "--iter",
+        type=int,
+        default=82000,
+        help="""If positive, --epoch is ignored and it
+        will use the checkpoint exp_dir/checkpoint-iter.pt.
+        You can specify --avg to use more checkpoints for model averaging.
+        """,
+    )
+
+    parser.add_argument(
+        "--avg",
+        type=int,
+        default=3,
+        help="Number of checkpoints to average. Automatically select "
+        "consecutive checkpoints before the checkpoint specified by "
+        "'--epoch'. ",
+    )
+    
+    parser.add_argument(
         "--log-interval",
         type=int,
         default=100,
@@ -369,6 +396,11 @@ def get_parser():
     parser.add_argument(
         "--no-overlap",
         type=bool, default=False,
+    )
+    
+    parser.add_argument(
+        "--ami",
+        type=str2bool, default=False,
     )
     return parser
 
@@ -471,6 +503,19 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     model = bundle.get_model()
     x = torch.rand(1, 400)
     odim = model(x)[0].size(-1)
+    
+    if params.pretrained_dir is not None and params.pretrained_dir.strip() != "":
+        # Get the averaged model from the last few saved checkpoints
+        filenames = find_checkpoints(
+            params.pretrained_dir,
+            iteration=-params.iter
+        )[:params.avg]
+        state_dict = average_checkpoints(filenames, device='cpu')
+        
+        # Loading pretrained model
+        for name, p in model.named_parameters():
+            p.data.copy_(state_dict[f'encoder.{name}'].data)
+
     return model, odim
 
 
@@ -1197,7 +1242,11 @@ def run(rank, world_size, args):
 
     args.return_cuts = False
     librispeech = LibriSpeechAsrDataModule(args)
-    train_cuts = librispeech.train_cuts()
+    if params.ami:
+        train_cuts = librispeech.train_ami_cuts()
+    else:
+        train_cuts = librispeech.train_cuts()
+
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
         # saved in the middle of an epoch
@@ -1229,8 +1278,12 @@ def run(rank, world_size, args):
     train_dl = librispeech.train_dataloaders(
         train_cuts, sampler_state_dict=sampler_state_dict
     )
-   
-    valid_cuts = librispeech.valid_cuts(params.no_overlap)
+  
+    if params.ami:
+        valid_cuts = librispeech.valid_ami_cuts()
+    else: 
+        valid_cuts = librispeech.valid_cuts(params.no_overlap)
+    
     valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 

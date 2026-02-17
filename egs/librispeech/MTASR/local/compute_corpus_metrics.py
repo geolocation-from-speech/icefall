@@ -15,7 +15,7 @@ def compute_avg_speaker_density_per_example(start_frames_list, num_frames_list):
     """
     avg_densities = []
     avg_overlaps = []
-    avg_durations = 0
+    avg_duration = 0
     for start_frames, num_frames in zip(start_frames_list, num_frames_list):
         assert len(start_frames) == len(num_frames)
         if len(start_frames) == 0:
@@ -33,6 +33,7 @@ def compute_avg_speaker_density_per_example(start_frames_list, num_frames_list):
         avg_densities.append(avg_density)
         avg_overlaps.append(np.sum((density > 1)) / len(density))
 
+    print(f"Avg dur: {avg_duration / len(start_frames_list)}")
     return avg_densities, avg_overlaps
 
 
@@ -42,10 +43,15 @@ def main(args):
     # Get the start frames and the num_frames
     starts = []
     durations = []
+    audio_durs = 0
+    speakers = []
     for c in cuts:
         c_starts = []
         c_durations = []
+        audio_durs += c.duration
+        speakers_ = set()
         for s in c.supervisions:
+            speakers_.add(s.speaker)
             vals = {}
             for name, val in [("start", s.start), ("duration", s.duration)]:
                 vals[name] = compute_num_frames(
@@ -55,14 +61,16 @@ def main(args):
                 )
             c_starts.append(vals["start"])
             c_durations.append(vals["duration"])
+        speakers.append(len(speakers_))
         starts.append(c_starts)
         durations.append(c_durations)
     
     densities, overlaps = compute_avg_speaker_density_per_example(starts, durations)
     print(f"Avg density: {np.array(densities).mean()}")
-    print(f"Avg overlap %: {np.array(overlaps).mean()}")
+    print(f"Avg overlap %: {100*np.array(overlaps).mean()}")
     print(f"Avg # segs / group: {sum([len(s) for s in starts])/len(starts)}")
-    print(f"Avg dur: {}")
+    print(f"Avg # spks  group: {sum(speakers) / len(starts)}")
+    print(f"Avg dur {audio_durs/len(cuts)}")
 
 
 if __name__ == "__main__":

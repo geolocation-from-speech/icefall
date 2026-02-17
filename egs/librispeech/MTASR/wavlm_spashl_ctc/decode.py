@@ -480,6 +480,7 @@ def main():
     params.vocab_size = graph_compiler.sp.vocab_size()
 
     logging.info("About to create model")
+    params.pretrained_dir = None
     model = get_mdctc_model(params)
 
     if not params.use_averaged_model:
@@ -606,7 +607,17 @@ def main():
             model=model,
             graph_compiler=graph_compiler,
         )
-    
+ 
+        hyps_sessions = dict.fromkeys([h['session_id'] for h in hyps])
+        # For any missing hyps add in an empty line
+        for r in refs:
+            if r['session_id'] not in hyps_sessions:
+                h_ = r
+                h_['words'] = ""
+                hyps.append(h_)
+        hyps = sorted(hyps, key=lambda x: (x["session_id"], x["start_time"]))
+        
+        # Dump refs and hyps to file
         decode_dir = params.exp_dir / "decode"
         decode_dir.mkdir(parents=True, exist_ok=True)
         with open(decode_dir / f"hyps_chkpt{params.iter}_avg{params.avg}_{set}_{params.suffix}.stm", "w") as f:

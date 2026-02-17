@@ -2,10 +2,11 @@ from __future__ import annotations
 import argparse
 import json
 
-from typing import Any, Dict, Iterable, List, Tuple, Optional
-from collections import defaultdict
+from typing import Any, Dict, Iterable, List, Tuple, Optional, Hashable
+from collections import defaultdict, deque
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from scipy.stats import kendalltau
 from tqdm import tqdm
 
 
@@ -120,8 +121,131 @@ def token_speaker_error(pred_rows: List[TokenRow], ref_rows: List[TokenRow]) -> 
     return sum(1 for pr, rr in zip(pred_rows, ref_rows) if pr[0] != rr[0])
 
 
-   
-    
+def annotate_with_occurrence(seq: List[str]) -> List[Tuple[str, int]]:
+    """
+    Convert sequence like:
+
+        a b a c
+
+    into:
+
+        (a,0) (b,0) (a,1) (c,0)
+    """
+    counts = defaultdict(int)
+    out = []
+
+    for x in seq:
+        k = counts[x]
+        out.append((x, k))
+        counts[x] += 1
+
+    return out
+
+
+def map_hyp_to_ref_tuples(ref: List[str], hyp: List[str]):
+    """
+    Produces:
+
+      ref_tuples = [(a,0),(b,0),(a,1),(c,0)]
+      hyp_tuples = [(b,0),(a,0),(c,0),(a,1)]
+    """
+
+    # First label reference
+    ref_tuples = annotate_with_occurrence(ref)
+
+    # Build lookup: token -> queue of available occurrence indices
+    available = defaultdict(deque)
+
+    for token, occ in ref_tuples:
+        available[token].append(occ)
+
+    hyp_tuples = []
+
+    for token in hyp:
+        if not available[token]:
+            import pdb; pdb.set_trace()
+            raise ValueError(f"Token {token} appears more times in hyp than in ref")
+
+        occ = available[token].popleft()
+        hyp_tuples.append((token, occ))
+
+    return ref_tuples, hyp_tuples
+
+
+def tuples_to_ints(ref_tuples, hyp_tuples):
+    """
+    Assign each (token,occ) a unique integer.
+    """
+    mapping = {t: i for i, t in enumerate(ref_tuples)}
+
+    ref_int = [mapping[t] for t in ref_tuples]
+    hyp_int = [mapping[t] for t in hyp_tuples]
+
+    return ref_int, hyp_int   
+
+
+class Fenwick:
+    """Fenwick tree for prefix sums on indices 0..n-1."""
+    def __init__(self, n: int):
+        self.n = n
+        self.bit = [0] * (n + 1)  # 1-indexed
+
+    def add(self, i: int, delta: int = 1) -> None:
+        i += 1
+        while i <= self.n:
+            self.bit[i] += delta
+            i += i & -i
+
+    def sum_prefix(self, i: int) -> int:
+        """Return sum over [0..i]. If i < 0, return 0."""
+        if i < 0:
+            return 0
+        i += 1
+        s = 0
+        while i > 0:
+            s += self.bit[i]
+            i -= i & -i
+        return s
+
+
+def kendall_tau_strings(ref, hyp):
+    ref_t, hyp_t = map_hyp_to_ref_tuples(ref, hyp)
+    ref_i, hyp_i = tuples_to_ints(ref_t, hyp_t)
+
+    tau, _ = kendalltau(ref_i, hyp_i)
+    return tau    
+
+
+
+def kendall_distance_fenwick(ref: List[Hashable], hyp: List[Hashable]) -> int:
+    """
+    Raw Kendall distance = # inversions = min # adjacent swaps to transform hyp into ref.
+    Works with duplicates by mapping tokens to unique (token, occurrence) IDs.
+    """
+    ref_ids, hyp_ids = map_hyp_to_ref_tuples(ref, hyp)
+    ref_int, hyp_int = tuples_to_ints(ref_ids, hyp_ids)
+
+    n = len(hyp_int)
+    bit = Fenwick(n)
+
+    inv = 0
+    seen = 0
+    for v in hyp_int:
+        # Among 'seen' previous elements, count how many are > v
+        inv += seen - bit.sum_prefix(v)
+        bit.add(v, 1)
+        seen += 1
+
+    return inv
+
+
+
+def kendall_distance_per_token(ref: List[Hashable], hyp: List[Hashable]) -> float:
+    """Convenient normalization: swaps per token."""
+    n = len(ref)
+    return kendall_distance_fenwick(ref, hyp) / max(1, n)
+
+
 
 def main(args):
     hyp = json.load(open(args.hyp))
@@ -145,6 +269,9 @@ def main(args):
     total_errors = []
     boundary_errors = []
     duration_errors = []
+    kendall_taus = []
+    kendall_dists = []
+    string_errors = []
     speaker_errors = 0
     total_tokens = 0
     num_utts = len(ref)
@@ -166,6 +293,11 @@ def main(args):
 
         h = sorted(utt_hyp[1], key=lambda x: (x[1], x[3]))
         r = sorted(utt_ref[1], key=lambda x: (x[1], x[3]))
+        tokens_h = [t[2] for t in sorted(utt_hyp[1], key=lambda x: x[3])]
+        tokens_r = [t[2] for t in sorted(utt_ref[1], key=lambda x: x[3])]
+        kendall_taus.append(kendall_tau_strings(tokens_r, tokens_h))
+        kendall_dists.append(kendall_distance_fenwick(tokens_r, tokens_h))
+        string_errors.append(tokens_h != tokens_r)
         assert len(h) == len(r)
         
         # Here we are going to relabel the speakers as restricted growth frames
@@ -206,7 +338,11 @@ def main(args):
     print(f"Mean duration error: {int(1000 * sum(duration_errors) / len(duration_errors))} ms")
     print(f"Failed on: {100*skipped / total}%")
     print(f"WDER: {100*speaker_errors / total_tokens}%") 
-    print(f"Partition Errors: {100*partition_errors / len(total_errors)}%")
+    print(f"Partition Errors: {100*partition_errors / len(hyp)}%")
+    print(f"Kendall Tau: {sum(kendall_taus)/len(hyp)}")
+    print(f"Kendall Dist: {sum(kendall_dists)/ total_tokens}")
+    print(f"String Error Rate: {sum(string_errors) / len(hyp)}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)

@@ -29,6 +29,10 @@ reverb=True
 normalize_loudness=False
 duration_increment=1e-03
 start_batch=0
+freeze_iters=2000
+freeze_lr=0.005
+pretrained_dir=
+iter=
 config=
 
 . ./shared/parse_options.sh
@@ -39,7 +43,7 @@ fi
 
 . /ocean/projects/cis210027p/mwiesner/jsalt2025/activate_python.sh
 
-python wavlm_spashl_ctc/train.py \
+echo python wavlm_spashl_ctc/train.py \
   --lang-dir ${langdir} \
   --exp-dir wavlm_spashl_ctc/${exp_name} --num-workers 3 \
   --world-size ${num_gpu} --use-fp16 True \
@@ -48,8 +52,8 @@ python wavlm_spashl_ctc/train.py \
   --base-lr ${lr} \
   --pct-start ${pct_start} \
   --collar ${collar} \
-  --freeze-lr 0.005 \
-  --freeze-iters 2000 \
+  --freeze-lr ${freeze_lr} \
+  --freeze-iters ${freeze_iters} \
   --max-num-spks ${num_spks} \
   --max-overlap 3 \
   --overlap ${overlap} \
@@ -73,5 +77,49 @@ python wavlm_spashl_ctc/train.py \
   --duration-increment ${duration_increment} \
   --max-unique ${max_unique} \
   --speaker-weight ${speaker_weight} \
-  --allow-self-overlap ${allow_self_overlap}
+  --allow-self-overlap ${allow_self_overlap} \
+  --ami ${ami} \
+  --pretrained-dir ${pretrained_dir} \
+  --iter ${iter} \
+  --avg ${avg}
+
+python wavlm_spashl_ctc/train.py \
+  --lang-dir ${langdir} \
+  --exp-dir wavlm_spashl_ctc/${exp_name} --num-workers 3 \
+  --world-size ${num_gpu} --use-fp16 True \
+  --start-batch ${start_batch} \
+  --max-duration ${max_duration} \
+  --base-lr ${lr} \
+  --pct-start ${pct_start} \
+  --collar ${collar} \
+  --freeze-lr ${freeze_lr} \
+  --freeze-iters ${freeze_iters} \
+  --max-num-spks ${num_spks} \
+  --max-overlap 3 \
+  --overlap ${overlap} \
+  --min-overlap ${min_overlap} \
+  --drift ${drift} \
+  --normalize-loudness ${normalize_loudness} \
+  --reverb ${reverb} \
+  --max-snr ${max_snr} \
+  --total-max-overlaps ${total_max_overlaps} \
+  --total-steps ${total_steps} \
+  --use-hat ${hat} \
+  --use-layer-norm ${layer_norm} \
+  --use-large ${large} \
+  --downsample ${downsample} \
+  --original-topo ${original_topo} \
+  --master-port ${master_port} \
+  --beam-size ${beam_size} \
+  --sort-strategy ${sort_strategy} \
+  --max-splices ${max_splices} \
+  --max-splice-duration ${max_splice_duration} \
+  --duration-increment ${duration_increment} \
+  --max-unique ${max_unique} \
+  --speaker-weight ${speaker_weight} \
+  --allow-self-overlap ${allow_self_overlap} \
+  --ami ${ami} \
+  --pretrained-dir ${pretrained_dir} \
+  --iter ${iter} \
+  --avg ${avg}
 
