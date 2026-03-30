@@ -388,7 +388,7 @@ class MDCTCGraphCompiler(object):
             num_ovlps = max_overlaps + 1
             collar_ = collar
             seqs, constraints, num_ovlps, sym_map = self.get_seqs_and_constraints_no_spk(
-                c, o, l, collar=collar_
+                c, o, l, collar=collar_, allow_self_overlap=True,
             )
             while num_ovlps > max_overlaps: 
                 collar_ = collar_ // 2
@@ -414,7 +414,11 @@ class MDCTCGraphCompiler(object):
             )
             ctc_topo = ctc_topo.to(self.device)
             fsa = fsa.to(self.device)
-            fsa_with_self_loop = k2.remove_epsilon_and_add_self_loops(fsa)
+            try:
+                fsa_with_self_loop = k2.remove_epsilon_and_add_self_loops(fsa)
+            except:
+                import pdb; pdb.set_trace()
+                print() 
             fsa_with_self_loop = k2.connect(fsa_with_self_loop)
             fsa_with_self_loop = k2.arc_sort(fsa_with_self_loop)
             graph = k2.compose(

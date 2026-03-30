@@ -470,7 +470,7 @@ class LibriSpeechAsrDataModule:
             cuts.append(c)     
         return CutSet(cuts)
 
-    
+
     @lru_cache()
     def valid_ami_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
@@ -533,9 +533,9 @@ class LibriSpeechAsrDataModule:
         return cuts
 
     @lru_cache()
-    def synth2_cuts(self, i) -> CutSet:
+    def synth2_cuts(self, i, ds="dev") -> CutSet:
         logging.info("About to get snythetic cuts")
-        cuts = load_manifest_lazy(f"data/manifests2/cuts_librispeech_dev_synth_{i}spk_8splices.jsonl.gz")
+        cuts = load_manifest_lazy(f"data/manifests2/cuts_librispeech_{ds}_synth_{i}spk_8splices.jsonl.gz")
         if self.args.normalize_loudness:
             return cuts.normalize_loudness(-23)
         return cuts

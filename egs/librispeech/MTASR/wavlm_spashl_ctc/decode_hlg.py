@@ -372,7 +372,7 @@ def decode_one_batch(
             speakers=target_spks, 
         )
         end_nnet = time.time()
-        subsampling_factor = params.subsampling_factor
+        subsampling_factor = 4 if params.downsample else 2
         use_double_scores = params.use_double_scores
     
     ctc_outputs = [c.clone() for c in ctc_outputs_]
@@ -409,7 +409,7 @@ def decode_one_batch(
             output_beam=params.output_beam,
             min_active_states=params.min_active_states,
             max_active_states=params.max_active_states,
-            subsampling_factor=params.subsampling_factor,
+            subsampling_factor=subsampling_factor,
         )
         
         if params.rescore:
@@ -612,6 +612,7 @@ def main():
     params.vocab_size = graph_compiler.sp.vocab_size()
 
     logging.info("About to create model")
+    params.pretrained_dir = None
     model = get_mdctc_model(params)
 
     if not params.use_averaged_model:
@@ -739,6 +740,10 @@ def main():
         HLG = k2.Fsa.from_dict(
             torch.load(f"{params.lang_dir}/HLG_modified.pt", map_location=device, weights_only=False)
         )
+        #HLG = k2.Fsa.from_dict(
+        #    torch.load(f"{params.lang_dir}/T.pt", map_location=device, weights_only=False)
+        #)
+
 
     assert HLG.requires_grad is False
 

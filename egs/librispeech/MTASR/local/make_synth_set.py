@@ -21,7 +21,8 @@ if __name__ == "__main__":
     #outpath = "data/manifests2/cuts_librispeech_dev_synth2.jsonl.gz" 
     outpath = args.outpath
 
-    speakers = list(Path("data/manifests2/librispeech_dev_clean_speakers").rglob("*.jsonl.gz"))
+    #speakers = list(Path("data/manifests2/librispeech_dev_clean_speakers").rglob("*.jsonl.gz"))
+    speakers = list(Path("data/manifests2/librispeech_test_clean_speakers").rglob("*.jsonl.gz"))
     num_spks = len(speakers)
     cut_info = []
     for s in speakers:

@@ -204,6 +204,12 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--oracle-num-spks",
+        type=int,
+        default=None,
+    )
+
+    parser.add_argument(
         "--max-overlap",
         type=int,
         default=3,
@@ -712,12 +718,13 @@ def align_one_batch(
         # If we don't have the speaker then we use the ground-truth segments
         # alignments, label the segments, and use the speaker labels on the 
         # corresponding time frames
+        num_spks = params.oracle_num_spks if params.oracle_num_spks is not None else params.max_num_spks
         if params.ignore_speaker:
             spks = segs.clone()
             for i in range(times.shape.dim0):
                 for s_i in range(1, len(speakers[i])+1):
                     scores_s_i = out2[i, ragged_frames[i][segs[i]==s_i], :]
-                    hyp_lbl = scores_s_i.sum(dim=0).argmax()
+                    hyp_lbl = scores_s_i.sum(dim=0)[0:num_spks].argmax()
                     spks[i][segs[i] == s_i] = hyp_lbl.to(torch.int32) 
         else: 
             spks = k2.RaggedTensor(units.shape, units.values // (params.vocab_size - 1))
@@ -993,6 +1000,7 @@ def main():
 
     synth_cuts = librispeech.synth_cuts()
     synth2_cuts = librispeech.synth2_cuts(2)
+    synth2_test_cuts = librispeech.synth2_cuts(2, ds="test")
     synth3_cuts = librispeech.synth2_cuts(3)
     l2m_test_both = librispeech.libri2mix_test_both_cuts()
     l2m_test_clean = librispeech.libri2mix_test_clean_cuts()
@@ -1006,6 +1014,7 @@ def main():
 
     synth_dl = librispeech.valid_dataloaders(synth_cuts)
     synth2_dl = librispeech.valid_dataloaders(synth2_cuts)
+    synth2_test_dl = librispeech.valid_dataloaders(synth2_test_cuts)
     synth3_dl = librispeech.valid_dataloaders(synth3_cuts)
     l2m_test_both_dl = librispeech.valid_dataloaders(l2m_test_both)
     l2m_test_clean_dl = librispeech.valid_dataloaders(l2m_test_clean)
@@ -1018,8 +1027,8 @@ def main():
     lcss_dl = librispeech.valid_dataloaders(libricss)
     ami_dev_dl = librispeech.valid_dataloaders(ami_dev)
 
-    test_sets = ["synth", "synth2", "synth3", "libri3mix", "l2m_test_clean", "l2m_test_both", "lsm_2", "lsm_3", "ls_test_other", "ls_test_clean", "lcss", "ami_dev"]
-    test_dl = [synth_dl, synth2_dl, synth3_dl, l3m_test_clean_dl, l2m_test_clean_dl, l2m_test_both_dl, lsm_2_dl, lsm_3_dl, ls_test_other_dl, ls_test_clean_dl, lcss_dl, ami_dev_dl]
+    test_sets = ["synth", "synth2", "synth2_test", "synth3", "libri3mix", "l2m_test_clean", "l2m_test_both", "lsm_2", "lsm_3", "ls_test_other", "ls_test_clean", "lcss", "ami_dev"]
+    test_dl = [synth_dl, synth2_dl, synth2_test_dl, synth3_dl, l3m_test_clean_dl, l2m_test_clean_dl, l2m_test_both_dl, lsm_2_dl, lsm_3_dl, ls_test_other_dl, ls_test_clean_dl, lcss_dl, ami_dev_dl]
 
     test_sets_dict = dict(zip(test_sets, test_dl))
     if params.test_sets is not None:
